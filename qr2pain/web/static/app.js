@@ -153,6 +153,7 @@ const SORTS = {
   exec: (x) => x.effective.execution_date || "9999",
   amount: (x) => Number(x.effective.amount || 0),
   account: (x) => (x.account ? x.account.label.toLowerCase() : "~"),
+  spath: (x) => (x.storage_path || "~").toLowerCase(),
 };
 
 $$("#filter button").forEach((b) => b.addEventListener("click", () => {
@@ -174,7 +175,7 @@ function visible() {
     .filter(f)
     .filter((x) => S.accFilter === "all" || String(x.account?.id ?? "none") === S.accFilter)
     .filter((x) => !S.q || [x.effective.creditor.name, x.title, x.correspondent, x.effective.reference,
-      x.effective.message, x.effective.iban, String(x.doc_id)].join(" ").toLowerCase().includes(S.q))
+      x.effective.message, x.effective.iban, x.storage_path, String(x.doc_id)].join(" ").toLowerCase().includes(S.q))
     .sort((a, b) => (SORTS[k](a) > SORTS[k](b) ? dir : SORTS[k](a) < SORTS[k](b) ? -dir : 0));
 }
 
@@ -240,6 +241,8 @@ function renderList() {
       <td class="num"><span class="ccy">${esc(e.currency)}</span><span class="${amtChanged ? "changed-val" : ""}">${money(e.amount)}</span>
         ${x.split ? `<div class="sub">offen ${money(x.open_amount)}</div>`
           : amtChanged && o.amount ? `<div class="sub">QR ${money(o.amount)}</div>` : x.amount_source === "paperless-Feld" ? `<div class="sub">aus paperless</div>` : ""}</td>
+      <td class="hide-md">${x.storage_path ? `<span class="spath" title="${esc(x.storage_path)}">${esc(x.storage_path)}</span>`
+        : `<span class="muted">–</span>`}</td>
       <td class="hide-md">${x.account ? `<span class="acc-tag" title="${esc(x.account.why)}">${esc(x.account.label)}</span>`
         : `<span class="acc-tag none" title="Kein Konto zugeordnet – beim Export wählen">ohne Konto</span>`}</td>
       <td>${badges(x)}</td></tr>`;
@@ -251,6 +254,7 @@ function renderList() {
         <td></td>
         <td>${dt(p.date)}</td>
         <td class="num"><span class="ccy">${esc(e.currency)}</span>${money(p.amount)}</td>
+        <td class="hide-md"></td>
         <td class="hide-md"></td>
         <td><div class="badges">${partBadge(x, p)}</div></td></tr>`;
     }).join("") : "";
@@ -529,6 +533,7 @@ async function openDrawer(id, keepTab = false) {
       <dl class="kv">
         <dt>Dokument</dt><dd>#${x.doc_id} · ${esc(x.title)}</dd>
         <dt>Korrespondent</dt><dd>${esc(x.correspondent || "–")}</dd>
+        <dt>Speicherpfad</dt><dd>${esc(x.storage_path || "–")}</dd>
         <dt>Dokumentdatum</dt><dd>${dt(x.created)}</dd>
         <dt>Fällig</dt><dd>${dt(x.due_date)}${x.due_estimated && x.due_date ? " (geschätzt aus Zahlungsfrist)" : ""}</dd>
         <dt>Belastungskonto</dt><dd>${x.account ? `${esc(x.account.label)} <span class="muted small">(${esc(x.account.why)})</span>`

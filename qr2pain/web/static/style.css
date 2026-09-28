@@ -316,3 +316,6 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform
 .file-list li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 @media (max-width: 1200px) { .hide-md { display: none; } }
 @media (max-width: 900px) { .rule-row { grid-template-columns: 1fr; } .rule-lbl { grid-row: auto; padding: 0; } .rule-row input { grid-column: 1; } }
+
+.spath { display: inline-block; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: middle; font-size: 12.5px; color: var(--text-2); }

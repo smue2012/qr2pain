@@ -188,6 +188,7 @@ def test_accounts_assignment_and_export(web):
     assert L[102]["account"]["id"] == e["id"]         # EUR -> EUR-Konto
     assert L[109]["account"]["id"] == b["id"] and "Tag" in L[109]["account"]["why"]
     assert L[110]["account"]["id"] == b["id"] and "Speicherpfad" in L[110]["account"]["why"]
+    assert L[110]["storage_path"] == "Firma B/Rechnungen" and L[101]["storage_path"] is None
 
     # Export: 101 (A), 102 (E), 109 (B), 103 übersteuert auf B -> 3 Dateien
     r = st.post("/api/exports", json={"items": ["101", "102", "109", "103"],

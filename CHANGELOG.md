@@ -1,5 +1,8 @@
 # Changelog
 
+## 1.4.1 – 2026-09-28
+- Zahlungsliste: neue Spalte «Speicherpfad» (sortierbar, in der Suche enthalten), auch in der Detailansicht
+
 ## 1.4.0 – 2026-09-28
 - **Mehrere Zahlungskonten** (z. B. für getrennte Firmen): Verwaltung im neuen Tab «Konten», nur für paperless-Superuser
 - Automatische Zuordnung pro Rechnung: Währung, dann Regeln nach paperless-Tag, Korrespondent oder Speicherpfad, sonst Standardkonto

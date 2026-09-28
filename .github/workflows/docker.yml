@@ -1,7 +1,7 @@
 name: Docker-Image
 
 # main    -> ghcr.io/<repo>:edge
-# Tag v*  -> ghcr.io/<repo>:1.2.1, :1.2 und :latest
+# Tag v*  -> ghcr.io/<repo>:1.0.0, :1.0 und :latest
 on:
   push:
     branches: [main]

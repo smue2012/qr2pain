@@ -97,7 +97,7 @@ class Store:
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(export_items)").fetchall()}
         if "part" not in cols:  # Version 1.0 -> Raten
             self.db.execute("ALTER TABLE export_items ADD COLUMN part INTEGER NOT NULL DEFAULT 0")
-        # Version 1.4: mehrere Belastungskonten
+        # Mehrere Belastungskonten (Datenbanken aus der Entwicklungszeit nachrüsten)
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(exports)").fetchall()}
         if "account_id" not in cols:
             self.db.execute("ALTER TABLE exports ADD COLUMN account_id INTEGER")

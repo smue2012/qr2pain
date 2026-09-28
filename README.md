@@ -27,7 +27,7 @@ bleibt erhalten und wird bei Bedarf automatisch migriert.
 | Image-Tag | Inhalt |
 |---|---|
 | `latest` | letzte Release-Version (empfohlen) |
-| `1.2`, `1.2.1` | feste Version |
+| `1.0`, `1.0.0` | feste Version |
 | `edge` | aktueller Stand von `main` |
 
 > Nach Änderungen an der `config.toml` genügt ein Neustart des Containers.
@@ -86,7 +86,7 @@ Beim Export sind die Zahlungen nach Konto gruppiert. Das Konto lässt sich pro G
 eine eigene pain.001-Datei,** die im E-Banking des jeweiligen Kontos hochgeladen wird. Konten, die schon in Exporten
 vorkommen, werden beim Löschen nur deaktiviert.
 
-Beim Update auf 1.4 wird das bisherige Konto aus `[debtor]` der `config.toml` als «Standard» übernommen.
+Beim ersten Start wird das Konto aus `[debtor]` der `config.toml` als «Standard» übernommen.
 
 ### Ausführungsdatum
 
@@ -185,7 +185,7 @@ Dazu `[paperless] url = "http://127.0.0.1:8765"` setzen und
 `QR2PAIN_CONFIG=config.toml uvicorn qr2pain.web.app:app --port 8010` starten.
 
 **Release:** Version in `qr2pain/__init__.py` erhöhen, `CHANGELOG.md` ergänzen,
-dann `git tag v1.2.1 && git push --tags`. GitHub baut das Image und veröffentlicht es als `latest`.
+dann auf GitHub ein Release mit Tag `v1.0.1` (bzw. der neuen Version) anlegen. GitHub baut das Image und veröffentlicht es als `latest`.
 
 ## Lizenz
 

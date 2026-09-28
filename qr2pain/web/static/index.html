@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="de-CH">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>qr2pain Zahlungen</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232a78d6'/%3E%3Cpath d='M8 8h7v7H8zM17 17h7v7h-7zM17 8h7v7h-7zM8 17h7v7H8z' fill='white' opacity='.9'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="static/style.css">
+  <script src="static/app.js" defer></script>
+</head>
+<body>
+  <!-- Anmeldung -->
+  <main id="login" class="login" hidden>
+    <form id="login-form" class="login-card">
+      <div class="brand"><span class="logo" aria-hidden="true"></span> qr2pain</div>
+      <p class="muted">Anmelden mit deinem paperless-Benutzer</p>
+      <label>Benutzername <input name="username" autocomplete="username" required autofocus></label>
+      <label>Passwort <input name="password" type="password" autocomplete="current-password" required></label>
+      <p id="login-error" class="form-error" role="alert"></p>
+      <button class="btn primary" type="submit">Anmelden</button>
+    </form>
+  </main>
+
+  <!-- Anwendung -->
+  <div id="app" hidden>
+    <header class="topbar">
+      <div class="brand"><span class="logo" aria-hidden="true"></span> qr2pain</div>
+      <nav class="tabs" role="tablist">
+        <button role="tab" data-view="payments" aria-selected="true">Zahlungen <span id="count-open" class="pill"></span></button>
+        <button role="tab" data-view="stats">Auswertungen</button>
+        <button role="tab" data-view="exports">Exporte</button>
+      </nav>
+      <div class="topbar-right">
+        <span id="sync-status" class="muted small"></span>
+        <button id="btn-sync" class="btn">Aus paperless laden</button>
+        <span id="user" class="muted small"></span>
+        <button id="btn-logout" class="btn ghost">Abmelden</button>
+      </div>
+    </header>
+
+    <!-- Zahlungen -->
+    <section id="view-payments" class="view">
+      <div class="toolbar">
+        <div class="seg" id="filter">
+          <button data-f="ready" aria-pressed="true">Bereit <span class="pill" data-c="ready"></span></button>
+          <button data-f="problem">Mit Problemen <span class="pill warn" data-c="problem"></span></button>
+          <button data-f="held">Zurückgestellt <span class="pill" data-c="held"></span></button>
+          <button data-f="all">Alle offenen <span class="pill" data-c="all"></span></button>
+        </div>
+        <input id="search" type="search" placeholder="Suchen: Empfänger, Referenz, Dokument…" aria-label="Suchen">
+      </div>
+      <div class="table-wrap">
+        <table class="grid" id="tbl">
+          <thead>
+            <tr>
+              <th class="chk"><input type="checkbox" id="chk-all" aria-label="Alle auswählen"></th>
+              <th data-sort="creditor">Empfänger</th>
+              <th data-sort="reference" class="hide-sm">Referenz</th>
+              <th data-sort="due">Fällig</th>
+              <th data-sort="exec">Ausführung</th>
+              <th data-sort="amount" class="num">Betrag</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="empty" class="empty" hidden></div>
+      </div>
+      <div id="selbar" class="selbar" hidden>
+        <span id="sel-info"></span>
+        <span class="spacer"></span>
+        <button class="btn" id="btn-hold">Zurückstellen</button>
+        <button class="btn" id="btn-release">Freigeben</button>
+        <button class="btn primary" id="btn-export">pain.001 erstellen</button>
+      </div>
+    </section>
+
+    <!-- Auswertungen -->
+    <section id="view-stats" class="view" hidden>
+      <div class="toolbar">
+        <h2>Auswertungen</h2>
+        <div class="seg" id="ccy" aria-label="Währung"></div>
+      </div>
+      <div class="tiles" id="tiles"></div>
+      <div class="cards">
+        <article class="card wide">
+          <h3>Liquiditätsvorschau <span class="muted small">offene Zahlungen nach Ausführungswoche</span></h3>
+          <div class="chart" id="ch-liq"></div>
+        </article>
+        <article class="card">
+          <h3>Offen nach Empfänger</h3>
+          <div id="ch-cred" class="hbars"></div>
+        </article>
+        <article class="card">
+          <h3>Bezahlt pro Monat <span class="muted small">letzte 12 Monate, aus Exporten</span></h3>
+          <div class="chart" id="ch-hist"></div>
+        </article>
+        <article class="card">
+          <h3>Top-Empfänger <span class="muted small">letzte 12 Monate</span></h3>
+          <div id="ch-top" class="hbars"></div>
+        </article>
+        <article class="card">
+          <h3>Fehler &amp; Duplikate</h3>
+          <div id="issues"></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- Exporte -->
+    <section id="view-exports" class="view" hidden>
+      <div class="toolbar"><h2>Exporte</h2></div>
+      <div id="exports"></div>
+    </section>
+  </div>
+
+  <!-- Detailansicht -->
+  <aside id="drawer" class="drawer" hidden aria-label="Rechnungsdetails">
+    <div class="drawer-head">
+      <div>
+        <div id="d-title" class="d-title"></div>
+        <div id="d-sub" class="muted small"></div>
+      </div>
+      <button class="btn ghost icon" id="d-close" aria-label="Schliessen">✕</button>
+    </div>
+    <div class="subtabs" role="tablist">
+      <button data-dt="pay" aria-selected="true">Zahlung</button>
+      <button data-dt="doc">Dokument</button>
+      <button data-dt="log">Verlauf</button>
+    </div>
+    <div class="drawer-body" id="d-pay"></div>
+    <div class="drawer-body doc" id="d-doc" hidden></div>
+    <div class="drawer-body" id="d-log" hidden></div>
+  </aside>
+  <div id="scrim" class="scrim" hidden></div>
+
+  <!-- Bestätigung -->
+  <div id="modal" class="modal" hidden role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <h3 id="m-title"></h3>
+      <div id="m-body"></div>
+      <div class="modal-actions">
+        <button class="btn" id="m-cancel">Abbrechen</button>
+        <button class="btn primary" id="m-ok">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="toasts" aria-live="polite"></div>
+</body>
+</html>

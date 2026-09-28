@@ -1,0 +1,45 @@
+# qr2pain – Konfiguration (CLI und Webfrontend)
+
+# Optional: Name des Auftraggebers im Header (Standard: debtor.name)
+# initiating_party = "Muster AG"
+
+# Optional: Monetary-Zusatzfeld in paperless für QR-Rechnungen ohne Betrag
+# amount_field = "Betrag"
+
+[paperless]
+url = "http://paperless-ngx-webserver-1:8000"  # Docker: Containername von paperless, immer Port 8000
+public_url = "https://paperless.example.ch"   # für Links «In paperless öffnen» (Standard: url)
+verify_tls = true                             # oder Pfad zu CA-Bundle
+# Nur für die Kommandozeile (das Webfrontend nutzt das Login des jeweiligen Benutzers):
+token = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[tags]
+pending  = "QR zu zahlen"     # Eingang: diese Dokumente werden exportiert
+exported = "QR exportiert"    # wird nach erfolgreichem Export gesetzt (auto-angelegt)
+error    = "QR Fehler"        # optional (nur CLI): markiert Dokumente, die nicht verarbeitet werden konnten
+remove_pending = true         # "zu zahlen"-Tag nach Export entfernen
+installments = "Ratenzahlung" # wird gesetzt, sobald eine Rechnung in Raten aufgeteilt ist ("" = aus)
+
+[debtor]                      # Belastungskonto
+name        = "Muster AG"
+iban        = "CH93 0076 2011 6238 5295 7"
+# bic       = "BCLUCH22XXX"  # optional – ohne BIC wird die IID aus der IBAN verwendet
+street      = "Bahnhofstrasse"
+building    = "1"
+postal_code = "6000"
+town        = "Luzern"
+country     = "CH"
+
+[web]
+# data_dir = "/var/lib/qr2pain"   # nur ohne Docker nötig (Docker: fix /data) – Datenbank ins Backup!
+# root_path = "/qr2pain"          # nur wenn unter einem Unterpfad hinter dem Reverse Proxy
+secure_cookie = "auto"            # auto = sicheres Cookie, sobald über HTTPS aufgerufen
+session_hours = 8
+# allowed_users = ["stephan", "buchhaltung"]   # leer = alle paperless-Benutzer
+
+due_field = "Fällig am"           # paperless-Datumsfeld mit der Fälligkeit (optional)
+default_terms_days = 30           # ohne Fälligkeitsfeld: Dokumentdatum + x Tage
+lead_days = 1                     # Ausführung x Tage vor Fälligkeit (nächster Bankwerktag davor)
+
+# access_cache_seconds = 60       # so lange merkt sich qr2pain die paperless-Berechtigungen pro Anmeldung
+# download_workers = 4            # parallele Downloads beim Laden aus paperless

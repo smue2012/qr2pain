@@ -1,0 +1,848 @@
+"""Geschäftslogik des Webfrontends: Sync aus paperless, Korrekturen, Export, Auswertungen."""
+from __future__ import annotations
+
+import re
+import threading
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import lru_cache
+from dataclasses import replace
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+import requests
+
+from .. import pain001
+from ..paperless import Paperless
+from ..qrscan import find_swiss_qr
+from ..swissqr import Address, QRBill, QRBillError, parse, validate
+from .store import Store, now
+
+CREDITOR_KEYS = ("name", "street", "building", "postal_code", "town", "country")
+OVERRIDE_KEYS = {"amount", "execution_date", "iban", "reference", "message", "currency",
+                 "dup_ok", "comment", "installments"} | {f"creditor_{k}" for k in CREDITOR_KEYS}
+MAX_PARTS = 60
+
+
+def parse_item(v: Any) -> tuple[int, int]:
+    """Export-Position: 101 / "101" = ganze Rechnung, "101:2" = Rate 2."""
+    doc, _, part = str(v).partition(":")
+    return int(doc), int(part or 0)
+
+
+# ============================================================ Hilfsfunktionen
+
+def next_business_day(d: date) -> date:
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+def prev_business_day(d: date) -> date:
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def to_date(s: str | None) -> date | None:
+    try:
+        return date.fromisoformat(str(s)[:10]) if s else None
+    except ValueError:
+        return None
+
+
+def to_amount(v: Any) -> Decimal | None:
+    if v in (None, ""):
+        return None
+    m = re.search(r"(\d+(?:[.,]\d{1,2})?)", str(v).replace("'", "").replace("’", ""))
+    if not m:
+        return None
+    try:
+        return Decimal(m.group(1).replace(",", ".")).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        return None
+
+
+def ref_type_for(reference: str) -> str:
+    r = reference.replace(" ", "").upper()
+    if not r:
+        return "NON"
+    if r.startswith("RF"):
+        return "SCOR"
+    return "QRR" if r.isdigit() else "?"
+
+
+@lru_cache(maxsize=8192)
+def _parse_cached(raw: str) -> QRBill:
+    """QR-Payload nur einmal parsen (QRBill wird nie verändert, nur per replace() kopiert)."""
+    return parse(raw, check=False)
+
+
+def _empty_bill() -> QRBill:
+    return QRBill(iban="", creditor=Address("S", ""), amount=None, currency="CHF",
+                  debtor=None, ref_type="NON", reference="")
+
+
+# ============================================================ effektive Zahlungsdaten
+
+class Engine:
+    def __init__(self, cfg: dict, store: Store):
+        self.cfg = cfg
+        self.store = store
+        w = cfg.get("web", {})
+        self.lead_days = int(w.get("lead_days", 1))
+        self.default_terms = int(w.get("default_terms_days", 30))
+        self.sync_state: dict[str, Any] = {"running": False}
+        self._sync_lock = threading.Lock()
+        self._snap: tuple | None = None
+        self._snap_lock = threading.Lock()
+        self.download_workers = int(w.get("download_workers", 4))
+
+    # ---------------------------------------------------------------- Ausführungsdatum
+    def default_exec_date(self, due: date | None, today: date | None = None) -> date:
+        earliest = next_business_day(today or date.today())
+        if not due:
+            return earliest
+        wanted = prev_business_day(due - timedelta(days=self.lead_days))
+        return max(earliest, wanted)
+
+    def due_of(self, row: dict) -> tuple[date | None, bool]:
+        """Fälligkeit aus paperless-Feld, sonst Dokumentdatum + Standard-Zahlungsfrist."""
+        d = to_date(row.get("due_date"))
+        if d:
+            return d, False
+        c = to_date(row.get("created"))
+        return (c + timedelta(days=self.default_terms), True) if c else (None, True)
+
+    # ---------------------------------------------------------------- Kern
+    def paid_parts(self, doc_id: int | None = None) -> dict[int, dict[int, dict]]:
+        """Bereits exportierte (nicht rückgängig gemachte) Positionen: doc_id -> part -> Info."""
+        sql = ("SELECT i.doc_id, i.part, i.amount, i.exec_date, i.export_id FROM export_items i "
+               "JOIN exports x ON x.id=i.export_id WHERE x.reverted_at IS NULL")
+        rows = self.store.q(sql + " AND i.doc_id=?", doc_id) if doc_id else self.store.q(sql)
+        out: dict[int, dict[int, dict]] = defaultdict(dict)
+        for r in rows:
+            out[r["doc_id"]][r["part"]] = r
+        return out
+
+    def effective(self, row: dict, dup_index: dict | None = None, paid: dict | None = None) -> dict:
+        ov = row["overrides"]
+        if paid is None:
+            paid = self.paid_parts(row["doc_id"])
+        paid_here = paid.get(row["doc_id"], {})
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        original = None
+        bill = _empty_bill()
+        if row.get("qr_raw"):
+            try:
+                bill = _parse_cached(row["qr_raw"])
+                original = bill_to_dict(bill)
+            except QRBillError as e:
+                errors.append(f"QR-Code unlesbar: {e}")
+        elif row.get("scan_error"):
+            if not ov.get("iban"):
+                errors.append(f"{row['scan_error']} – Zahlungsdaten manuell erfassen")
+
+        # --- Korrekturen anwenden
+        if ov.get("iban"):
+            bill = replace(bill, iban=ov["iban"].replace(" ", "").upper())
+        if "reference" in ov:
+            ref = (ov["reference"] or "").replace(" ", "").upper()
+            bill = replace(bill, reference=ref, ref_type=ref_type_for(ref))
+        if "message" in ov:
+            bill = replace(bill, message=ov["message"] or "")
+        if ov.get("currency"):
+            bill = replace(bill, currency=ov["currency"])
+        cred_ov = {k: ov[f"creditor_{k}"] for k in CREDITOR_KEYS if f"creditor_{k}" in ov}
+        if cred_ov:
+            c = bill.creditor
+            if c.adr_type == "K":  # kombinierte Adresse bei Korrektur in strukturierte überführen
+                m = re.match(r"^\s*(\d{4,5})\s+(.+)$", c.building_or_line2)
+                c = Address("S", c.name, c.street_or_line1, "",
+                            m.group(1) if m else "", m.group(2) if m else c.building_or_line2, c.country)
+            mapping = {"name": "name", "street": "street_or_line1", "building": "building_or_line2",
+                       "postal_code": "postal_code", "town": "town", "country": "country"}
+            c = replace(c, adr_type="S", **{mapping[k]: (v or "").strip() for k, v in cred_ov.items()})
+            if c.country:
+                c = replace(c, country=c.country.upper())
+            bill = replace(bill, creditor=c)
+
+        # --- Betrag
+        amount = to_amount(ov.get("amount")) if ov.get("amount") not in (None, "") else None
+        amount_src = "korrigiert"
+        if amount is None and bill.amount is not None:
+            amount, amount_src = bill.amount.quantize(Decimal("0.01")), "QR-Code"
+        if amount is None and row.get("pl_amount"):
+            amount, amount_src = to_amount(row["pl_amount"]), "paperless-Feld"
+        if amount is None:
+            errors.append("Kein Betrag – bitte erfassen")
+            amount_src = ""
+        if bill.amount is not None and amount is not None and amount != bill.amount:
+            diff = bill.amount - amount
+            warnings.append(f"Betrag weicht vom QR-Code ab ({bill.currency} {bill.amount} → {amount}, "
+                            f"Differenz {diff:+.2f})")
+
+        # --- Validierung (mit effektivem Betrag)
+        try:
+            validate(replace(bill, amount=amount))
+        except QRBillError as e:
+            if not (row.get("scan_error") and not ov.get("iban")):  # Fehler bereits gemeldet
+                errors.append(str(e))
+        c = bill.creditor
+        if bill.iban and not (c.town or (c.adr_type == "K" and c.building_or_line2)):
+            errors.append("Ort des Zahlungsempfängers fehlt")
+
+        # --- Datum
+        due, due_estimated = self.due_of(row)
+        today = date.today()
+        if ov.get("execution_date"):
+            exec_date = to_date(ov["execution_date"])
+            if exec_date and exec_date < today:
+                errors.append("Ausführungsdatum liegt in der Vergangenheit")
+            elif exec_date and exec_date.weekday() >= 5:
+                warnings.append("Ausführungsdatum ist ein Wochenende – Bank führt am nächsten Bankwerktag aus")
+        else:
+            exec_date = self.default_exec_date(due, today)
+        # --- Aufteilung in Raten
+        plan = ov.get("installments") or []
+        parts: list[dict] = []
+        open_amount = amount
+        if plan:
+            n_total = len(plan)
+            total = Decimal(0)
+            open_amount = Decimal(0)
+            for n, p in enumerate(plan, start=1):
+                pa, pd = to_amount(p.get("amount")), to_date(p.get("date"))
+                done = paid_here.get(n)
+                perr = []
+                if not done:
+                    if pa is None or pa <= 0:
+                        perr.append("Betrag fehlt")
+                    if not pd:
+                        perr.append("Datum fehlt")
+                    elif pd < today:
+                        perr.append("Datum liegt in der Vergangenheit")
+                    open_amount += pa or Decimal(0)
+                total += pa or Decimal(0)
+                parts.append({"no": n, "of": n_total, "amount": str(pa) if pa is not None else None,
+                              "date": pd.isoformat() if pd else None, "errors": perr,
+                              "exported": bool(done), "export_id": done["export_id"] if done else None,
+                              "_amount": pa, "_date": pd})
+            if amount is not None and total != amount:
+                errors.append(f"Raten ergeben {bill.currency} {total:.2f}, zu zahlen sind {amount:.2f} "
+                              f"(Differenz {amount - total:+.2f})")
+            open_parts = [p for p in parts if not p["exported"]]
+            if open_parts and open_parts[0]["_date"]:
+                exec_date = min(p["_date"] for p in open_parts if p["_date"])
+        elif due and exec_date and exec_date > due and row["status"] == "open":
+            warnings.append(f"Zahlung erfolgt nach Fälligkeit ({due:%d.%m.%Y})")
+
+        eff = bill_to_dict(bill)
+        eff.update(amount=str(amount) if amount is not None else None,
+                   execution_date=exec_date.isoformat() if exec_date else None)
+        base_ok = row["status"] == "open" and not row["held"] and not errors
+        for p in parts:
+            p["exportable"] = base_ok and not p["exported"] and not p["errors"]
+        exportable = any(p["exportable"] for p in parts) if parts else base_ok
+        result = {
+            "doc_id": row["doc_id"], "title": row["title"], "correspondent": row["correspondent"],
+            "created": row["created"], "asn": row["asn"],
+            "due_date": due.isoformat() if due else None, "due_estimated": due_estimated,
+            "status": row["status"], "held": bool(row["held"]), "export_id": row["export_id"],
+            "scan_error": row["scan_error"], "amount_source": amount_src,
+            "original": original, "effective": eff,
+            "overrides": ov,
+            "overridden": sorted(k for k in ov if k not in ("comment", "dup_ok", "installments")),
+            "errors": errors, "warnings": warnings, "duplicate": False,
+            "exportable": exportable,
+            "split": bool(parts), "parts": [{k: v for k, v in p.items() if not k.startswith("_")} for p in parts],
+            "parts_done": sum(p["exported"] for p in parts),
+            "open_amount": str(open_amount) if open_amount is not None else None,
+            "_bill": bill, "_amount": amount, "_exec": exec_date, "_parts": parts, "_open_amount": open_amount,
+            "_held": bool(row["held"]),
+            "_dupkey": dup_key(bill.iban, bill.reference, amount, bill.message)
+            if amount is not None and bill.iban else None,
+        }
+        if dup_index is not None:
+            apply_duplicates(result, dup_index)
+        return result
+
+    def dup_index(self, paid: dict | None = None, effs: list[dict] | None = None) -> dict:
+        paid = self.paid_parts() if paid is None else paid
+        if effs is None:
+            effs = [self.effective(r, paid=paid) for r in self.store.invoices("status='open'")]
+        idx: dict[tuple, list[dict]] = defaultdict(list)
+        for e in effs:
+            if e["status"] == "open" and e["_dupkey"]:
+                idx[e["_dupkey"]].append({"kind": "open", "doc_id": e["doc_id"]})
+        per_doc: dict[int, list[dict]] = defaultdict(list)
+        for it in self.store.q(
+                "SELECT i.* FROM export_items i JOIN exports x ON x.id=i.export_id "
+                "WHERE x.reverted_at IS NULL"):
+            a = to_amount(it["amount"])
+            idx[paid_key(it["iban"], it["reference"] or "", a)].append(
+                {"kind": "paid", "doc_id": it["doc_id"], "export_id": it["export_id"],
+                 "exec_date": it["exec_date"]})
+            per_doc[it["doc_id"]].append(it)
+        # in Raten bezahlte Rechnungen zusätzlich mit ihrer Gesamtsumme erfassen
+        for doc_id, its in per_doc.items():
+            if len(its) > 1:
+                s = sum((to_amount(i["amount"]) or Decimal(0) for i in its), Decimal(0))
+                last = max(its, key=lambda i: i["exec_date"])
+                idx[paid_key(last["iban"], last["reference"] or "", s)].append(
+                    {"kind": "paid", "doc_id": doc_id, "export_id": last["export_id"],
+                     "exec_date": last["exec_date"]})
+        return idx
+
+    def snapshot(self) -> dict[int, dict]:
+        """Alle Rechnungen fertig berechnet. Wird nur neu berechnet, wenn sich Daten geändert haben
+        (Änderungszähler der Datenbank) oder ein neuer Tag begonnen hat (Datumsprüfungen)."""
+        key = (self.store.gen, date.today())
+        snap = self._snap
+        if snap and snap[0] == key:
+            return snap[1]
+        with self._snap_lock:
+            if self._snap and self._snap[0] == key:
+                return self._snap[1]
+            paid = self.paid_parts()
+            effs = {r["doc_id"]: self.effective(r, None, paid) for r in self.store.invoices()}
+            idx = self.dup_index(paid, list(effs.values()))
+            for e in effs.values():
+                apply_duplicates(e, idx)
+            self._snap = (key, effs)
+            return effs
+
+    def list(self, status: str | None = "open", visible: set[int] | None = None) -> list[dict]:
+        return [e for e in self.snapshot().values()
+                if (status is None or e["status"] == status) and (visible is None or e["doc_id"] in visible)]
+
+    def get(self, doc_id: int) -> dict | None:
+        e = self.snapshot().get(doc_id)
+        return dict(e) if e else None
+
+    # ---------------------------------------------------------------- Raten
+    def _check_installments(self, value: Any, old: list, done: dict) -> list[dict]:
+        if not isinstance(value, list) or not 2 <= len(value) <= MAX_PARTS:
+            raise ValueError(f"Aufteilung braucht 2 bis {MAX_PARTS} Raten")
+        clean = []
+        for n, p in enumerate(value, start=1):
+            if not isinstance(p, dict):
+                raise ValueError(f"Rate {n}: ungültig")
+            a, d = to_amount(p.get("amount")), to_date(p.get("date"))
+            if a is None or a <= 0:
+                raise ValueError(f"Rate {n}: Betrag ungültig")
+            if not d:
+                raise ValueError(f"Rate {n}: Datum ungültig")
+            clean.append({"amount": str(a), "date": d.isoformat()})
+        for n in done:  # bereits exportierte Raten dürfen sich nicht ändern
+            if n > len(clean) or n > len(old) or clean[n - 1] != old[n - 1]:
+                raise ValueError(f"Rate {n} ist bereits exportiert und kann nicht geändert werden")
+        return clean
+
+    # ---------------------------------------------------------------- Korrekturen
+    def update_overrides(self, user: str, doc_id: int, changes: dict, pl: Paperless | None = None) -> dict:
+        row = self.store.invoice(doc_id)
+        if not row:
+            raise KeyError(doc_id)
+        if row["status"] != "open":
+            raise ValueError("Bereits exportierte Rechnungen können nicht geändert werden")
+        unknown = set(changes) - OVERRIDE_KEYS
+        if unknown:
+            raise ValueError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+        if changes.get("amount") not in (None, "") and to_amount(changes["amount"]) is None:
+            raise ValueError("Betrag ungültig")
+        if changes.get("execution_date") and not to_date(changes["execution_date"]):
+            raise ValueError("Datum ungültig")
+        if changes.get("currency") not in (None, "", "CHF", "EUR"):
+            raise ValueError("Nur CHF oder EUR möglich")
+        ov = dict(row["overrides"])
+        done = self.paid_parts(doc_id).get(doc_id, {})
+        if done:
+            locked = set(changes) - {"installments", "comment", "dup_ok"}
+            if locked:
+                raise ValueError("Es wurden bereits Raten exportiert – nur noch die offenen Raten sind änderbar")
+            if "installments" in changes and not changes["installments"]:
+                raise ValueError("Aufteilung kann nicht entfernt werden, es wurden bereits Raten exportiert")
+        if changes.get("installments"):
+            changes["installments"] = self._check_installments(
+                changes["installments"], ov.get("installments") or [], done)
+            changes["execution_date"] = None  # Datum gilt pro Rate
+        log = []
+        for k, v in changes.items():
+            old = ov.get(k)
+            if k == "installments":
+                if not v and k in ov:
+                    del ov[k]
+                    log.append("Aufteilung entfernt")
+                elif v and v != old:
+                    ov[k] = v
+                    log.append(f"Aufteilung in {len(v)} Raten: " + ", ".join(
+                        f"{p['amount']} am {to_date(p['date']):%d.%m.%Y}" for p in v))
+                continue
+            if v is None or v == "" and k not in ("reference", "message"):
+                if k in ov:
+                    del ov[k]
+                    log.append(f"{k}: «{old}» → (Original)")
+            elif old != v:
+                ov[k] = v
+                log.append(f"{k}: «{old if old is not None else 'Original'}» → «{v}»")
+        warnings = []
+        if log:
+            self.store.set_overrides(doc_id, ov)
+            self.store.audit(user, doc_id, "Korrektur", "; ".join(log))
+            had, has = bool(row["overrides"].get("installments")), bool(ov.get("installments"))
+            if pl and had != has:
+                warnings = self.tag_installments(pl, doc_id, has)
+        out = self.get(doc_id)
+        out["tag_warnings"] = warnings
+        return out
+
+    def set_held(self, user: str, ids: list[int], held: bool) -> None:
+        for i in ids:
+            r = self.store.invoice(i)
+            if r and r["status"] == "open" and bool(r["held"]) != held:
+                self.store.x("UPDATE invoices SET held=? WHERE doc_id=?", int(held), i)
+                self.store.audit(user, i, "Zurückgestellt" if held else "Freigegeben")
+
+    # ---------------------------------------------------------------- Sync
+    def start_sync(self, pl: Paperless, user: str) -> bool:
+        if not self._sync_lock.acquire(blocking=False):
+            return False
+        self.sync_state = {"running": True, "user": user, "started_at": now(),
+                           "done": 0, "total": 0, "new": 0, "removed": 0, "errors": []}
+        threading.Thread(target=self._sync, args=(pl, user), daemon=True).start()
+        return True
+
+    def _sync(self, pl: Paperless, user: str) -> None:
+        st = self.sync_state
+        try:
+            tcfg = self.cfg.get("tags", {})
+            pending = pl.tag_id(tcfg.get("pending", "QR zu zahlen"))
+            exported = pl.tag_id(tcfg.get("exported", "QR exportiert"), create=True)
+            w = self.cfg.get("web", {})
+            due_f = pl.custom_field_id(w["due_field"]) if w.get("due_field") else None
+            amt_f = pl.custom_field_id(self.cfg["amount_field"]) if self.cfg.get("amount_field") else None
+            corr = pl.names("correspondents")
+
+            docs = list(pl.documents([pending], [exported]))
+            st["total"] = len(docs)
+            seen = set()
+            todo = []
+            for doc in docs:
+                seen.add(doc["id"])
+                cf = {c["field"]: c.get("value") for c in doc.get("custom_fields", [])}
+                meta = dict(title=doc.get("title"), correspondent=corr.get(doc.get("correspondent")),
+                            created=str(doc.get("created") or doc.get("created_date") or "")[:10],
+                            asn=doc.get("archive_serial_number"),
+                            due_date=cf.get(due_f) if due_f else None,
+                            pl_amount=str(cf.get(amt_f)) if amt_f and cf.get(amt_f) else None,
+                            synced_at=now())
+                row = self.store.invoice(doc["id"])
+                if row and row["status"] == "exported":
+                    st["done"] += 1
+                elif row and row["modified"] == doc.get("modified") and (row["qr_raw"] or row["scan_error"]):
+                    self.store.upsert_invoice(doc["id"], **meta)   # unverändert: nur Metadaten
+                    st["done"] += 1
+                else:
+                    todo.append((doc, meta, row))
+
+            # Neue/geänderte Dokumente: parallel herunterladen, QR-Codes nacheinander lesen
+            with ThreadPoolExecutor(max_workers=self.download_workers) as pool:
+                futures = {pool.submit(pl.download_original, doc["id"]): (doc, meta, row)
+                           for doc, meta, row in todo}
+                for fut in as_completed(futures):
+                    doc, meta, row = futures[fut]
+                    try:
+                        data, mime = fut.result()
+                        payloads = find_swiss_qr(data, mime)
+                        if not payloads:
+                            qr, err = None, "Kein Swiss QR Code gefunden"
+                        else:
+                            qr, err = payloads[0], None
+                            if len(payloads) > 1:
+                                st["errors"].append(f"#{doc['id']}: {len(payloads)} QR-Codes, erster verwendet")
+                            try:
+                                parse(qr, check=False)
+                            except QRBillError as e:
+                                qr, err = None, f"QR-Code unlesbar: {e}"
+                    except Exception as e:  # noqa: BLE001
+                        qr, err = None, f"Download/Scan fehlgeschlagen: {e}"
+                    self.store.upsert_invoice(doc["id"], modified=doc.get("modified"),
+                                              qr_raw=qr, scan_error=err, **meta)
+                    if not row:
+                        st["new"] += 1
+                        self.store.audit(user, doc["id"], "Importiert", err or "QR-Code gelesen")
+                    st["done"] += 1
+
+            # Offene Rechnungen, die dieser Benutzer nicht mehr in der Liste sieht:
+            # nur entfernen, wenn das Tag wirklich weg ist – fehlende Rechte sind kein Grund.
+            superuser = pl.is_superuser()
+            for r in self.store.invoices("status='open'"):
+                if r["doc_id"] in seen:
+                    continue
+                reason = None
+                try:
+                    d = pl.get_document(r["doc_id"])
+                    if exported in d["tags"]:
+                        reason = "In paperless bereits als exportiert markiert"
+                    elif pending not in d["tags"]:
+                        reason = "Tag «zu zahlen» in paperless entfernt"
+                except requests.HTTPError as e:
+                    if e.response is not None and e.response.status_code == 404:
+                        if superuser:
+                            reason = "Dokument in paperless gelöscht"
+                        else:
+                            st["hidden"] = st.get("hidden", 0) + 1   # kein Zugriff: stehen lassen
+                    else:
+                        raise
+                if reason and not self.paid_parts(r["doc_id"]).get(r["doc_id"]):
+                    self.store.x("DELETE FROM invoices WHERE doc_id=?", r["doc_id"])
+                    self.store.audit(user, r["doc_id"], "Entfernt", reason)
+                    st["removed"] += 1
+            st["message"] = (f"{st['total']} Dokumente geprüft, {st['new']} neu, {st['removed']} entfernt"
+                             + (f", {st['hidden']} ohne Zugriff übersprungen" if st.get("hidden") else ""))
+        except Exception as e:  # noqa: BLE001
+            st["message"] = f"Sync fehlgeschlagen: {e}"
+            st["failed"] = True
+        finally:
+            st["running"] = False
+            st["finished_at"] = now()
+            self._sync_lock.release()
+
+    # ---------------------------------------------------------------- Export
+    def export(self, pl: Paperless, user: str, items: list) -> dict:
+        """items: Dokument-IDs (ganze Rechnung) bzw. "doc:rate" für einzelne Raten."""
+        paid = self.paid_parts()
+        idx = self.dup_index(paid)
+        wanted: dict[int, set[int]] = defaultdict(set)
+        for it in items:
+            doc, part = parse_item(it)
+            wanted[doc].add(part)
+
+        problems, units = [], []   # unit = (eff, part-dict | None)
+        for doc, parts in wanted.items():
+            r = self.store.invoice(doc)
+            if not r:
+                problems.append(f"#{doc}: nicht gefunden")
+                continue
+            e = self.effective(r, idx, paid)
+            label = f"#{doc} {e['effective']['creditor']['name'] or e['title']}"
+            if e["split"]:
+                if 0 in parts:  # ganze Rechnung gewählt -> alle offenen Raten
+                    parts = {p["no"] for p in e["_parts"] if not p["exported"]}
+                for n in sorted(parts):
+                    p = next((x for x in e["_parts"] if x["no"] == n), None)
+                    if not p:
+                        problems.append(f"{label}: Rate {n} existiert nicht")
+                    elif p["exported"]:
+                        problems.append(f"{label}: Rate {n} ist bereits exportiert (Export #{p['export_id']})")
+                    elif not p["exportable"]:
+                        why = p["errors"] or e["errors"] or (["zurückgestellt"] if e["held"] else [])
+                        problems.append(f"{label}, Rate {n}: {'; '.join(why)}")
+                    else:
+                        units.append((e, p))
+            else:
+                if parts != {0}:
+                    problems.append(f"{label}: Rechnung ist nicht aufgeteilt")
+                elif not e["exportable"]:
+                    why = e["errors"] or (["zurückgestellt"] if e["held"] else [f"Status {e['status']}"])
+                    problems.append(f"{label}: {'; '.join(why)}")
+                else:
+                    units.append((e, None))
+
+        # gleiche Zahlung aus verschiedenen Dokumenten in derselben Auswahl
+        keys = defaultdict(set)
+        for e, _ in units:
+            if e["_amount"] is not None:
+                b = e["_bill"]
+                keys[dup_key(b.iban, b.reference, e["_amount"], b.message)].add(e["doc_id"])
+        for key, docs in keys.items():
+            if len(docs) > 1 and not all(self.store.invoice(d)["overrides"].get("dup_ok") for d in docs):
+                problems.append("Gleiche Zahlung mehrfach ausgewählt: " + ", ".join(f"#{d}" for d in sorted(docs)))
+        if problems:
+            raise ValueError(problems)
+        if not units:
+            raise ValueError(["Keine Rechnungen ausgewählt"])
+
+        payments = []
+        for e, p in units:
+            e2e = f"PL{e['doc_id']}" + (f"-ASN{e['asn']}" if e["asn"] else "")
+            if p:
+                b = e["_bill"]
+                msg = f"Teilzahlung {p['no']}/{p['of']}" + (f" {b.message}" if b.message else "")
+                payments.append(pain001.Payment(replace(b, message=msg[:140]), f"{e2e}-T{p['no']}",
+                                                p["_amount"], p["_date"]))
+            else:
+                payments.append(pain001.Payment(e["_bill"], e2e, e["_amount"], e["_exec"]))
+        debtor = pain001.Debtor(**self.cfg["debtor"])
+        xml = pain001.build(debtor, payments, next_business_day(date.today()),
+                            self.cfg.get("initiating_party"))
+        msg_id = re.search(rb"<MsgId>([^<]+)</MsgId>", xml).group(1).decode()
+        filename = f"pain001_{datetime.now():%Y%m%d_%H%M%S}.xml"
+
+        complete, partial = [], []
+        with self.store.tx() as s:
+            cur = s.db.execute("INSERT INTO exports (msg_id, created_at, created_by, filename, xml) "
+                               "VALUES (?,?,?,?,?)", (msg_id, now(), user, filename, xml))
+            export_id = cur.lastrowid
+            filename = f"pain001_{datetime.now():%Y%m%d_%H%M}_E{export_id}.xml"
+            s.db.execute("UPDATE exports SET filename=? WHERE id=?", (filename, export_id))
+            for (e, p), pay in zip(units, payments):
+                b = e["_bill"]
+                s.db.execute("INSERT INTO export_items (export_id, doc_id, creditor, iban, reference, currency, "
+                             "amount, exec_date, part) VALUES (?,?,?,?,?,?,?,?,?)",
+                             (export_id, e["doc_id"], b.creditor.name, b.iban, b.reference, b.currency,
+                              str(pay.amount), pay.execution_date.isoformat(), p["no"] if p else 0))
+                what = f"Rate {p['no']}/{p['of']}, " if p else ""
+                s.db.execute("INSERT INTO audit (ts,user,doc_id,action,detail) VALUES (?,?,?,?,?)",
+                             (now(), user, e["doc_id"], "Exportiert",
+                              f"Export #{export_id}, {what}{b.currency} {pay.amount}, Ausführung {pay.execution_date}"))
+            for doc in dict.fromkeys(e["doc_id"] for e, _ in units):
+                e = next(e for e, _ in units if e["doc_id"] == doc)
+                if e["split"]:
+                    n_done = s.db.execute(
+                        "SELECT COUNT(DISTINCT i.part) FROM export_items i JOIN exports x ON x.id=i.export_id "
+                        "WHERE x.reverted_at IS NULL AND i.doc_id=? AND i.part>0", (doc,)).fetchone()[0]
+                    if n_done < len(e["_parts"]):
+                        partial.append((doc, n_done, len(e["_parts"])))
+                        continue
+                s.db.execute("UPDATE invoices SET status='exported', export_id=? WHERE doc_id=?", (export_id, doc))
+                complete.append(doc)
+
+        note = f"Zahlung exportiert in {filename} (Export #{export_id}) durch {user}"
+        warnings = self._tag(pl, complete, exported=True, note=note)
+        for doc, n_done, n in partial:
+            warnings += self._note(pl, doc, f"Teilzahlung exportiert in {filename} (Export #{export_id}), "
+                                            f"{n_done} von {n} Raten erledigt – durch {user}")
+        return {"id": export_id, "filename": filename, "count": len(units), "warnings": warnings}
+
+    def revert(self, pl: Paperless, user: str, export_id: int) -> dict:
+        ex = self.store.one("SELECT * FROM exports WHERE id=?", export_id)
+        if not ex:
+            raise KeyError(export_id)
+        if ex["reverted_at"]:
+            raise ValueError(["Export wurde bereits rückgängig gemacht"])
+        items = self.store.q("SELECT doc_id, part FROM export_items WHERE export_id=?", export_id)
+        docs = list(dict.fromkeys(r["doc_id"] for r in items))
+        reopened, notes = [], []
+        with self.store.tx() as s:
+            s.db.execute("UPDATE exports SET reverted_at=?, reverted_by=? WHERE id=?", (now(), user, export_id))
+            for d in docs:
+                parts = [r["part"] for r in items if r["doc_id"] == d]
+                st = s.db.execute("SELECT status FROM invoices WHERE doc_id=?", (d,)).fetchone()
+                if st and st[0] == "exported":  # war vollständig exportiert -> wieder offen
+                    s.db.execute("UPDATE invoices SET status='open', export_id=NULL WHERE doc_id=?", (d,))
+                    reopened.append(d)
+                else:
+                    notes.append(d)
+                what = ", ".join(f"Rate {p}" for p in parts if p) or "ganze Rechnung"
+                s.db.execute("INSERT INTO audit (ts,user,doc_id,action,detail) VALUES (?,?,?,?,?)",
+                             (now(), user, d, "Export rückgängig", f"Export #{export_id} ({what})"))
+        note = f"Export #{export_id} ({ex['filename']}) rückgängig gemacht durch {user}"
+        warnings = self._tag(pl, reopened, exported=False, note=note)
+        for d in notes:
+            warnings += self._note(pl, d, note)
+        return {"id": export_id, "count": len(items), "warnings": warnings}
+
+    def _note(self, pl: Paperless, doc_id: int, text: str) -> list[str]:
+        try:
+            pl.add_note(doc_id, text)
+            return []
+        except Exception as e:  # noqa: BLE001
+            return [f"#{doc_id}: Notiz in paperless nicht gespeichert ({e})"]
+
+    def tag_installments(self, pl: Paperless, doc_id: int, on: bool) -> list[str]:
+        """Tag «Ratenzahlung» setzen bzw. entfernen."""
+        name = self.cfg.get("tags", {}).get("installments", "Ratenzahlung")
+        if not name:
+            return []
+        try:
+            tag = pl.tag_id(name, create=True)
+            doc = pl.get_document(doc_id)
+            if on != (tag in doc["tags"]):
+                pl.update_tags(doc, add=[tag] if on else [], remove=[] if on else [tag])
+            return []
+        except Exception as e:  # noqa: BLE001
+            return [f"Tag «{name}» in paperless nicht gesetzt ({e})"]
+
+    def _tag(self, pl: Paperless, ids: list[int], exported: bool, note: str) -> list[str]:
+        tcfg = self.cfg.get("tags", {})
+        warnings = []
+        try:
+            pending = pl.tag_id(tcfg.get("pending", "QR zu zahlen"))
+            done = pl.tag_id(tcfg.get("exported", "QR exportiert"), create=True)
+        except Exception as e:  # noqa: BLE001
+            return [f"paperless-Tags nicht erreichbar: {e}"]
+        remove_pending = tcfg.get("remove_pending", True)
+        for i in ids:
+            try:
+                doc = pl.get_document(i)
+                if exported:
+                    pl.update_tags(doc, add=[done], remove=[pending] if remove_pending else [])
+                else:
+                    pl.update_tags(doc, add=[pending], remove=[done])
+                pl.add_note(i, note)
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"#{i}: paperless nicht aktualisiert ({e})")
+        return warnings
+
+    # ---------------------------------------------------------------- Auswertungen
+    def stats(self, visible: set[int] | None = None) -> dict:
+        today = date.today()
+        items = self.list("open", visible)
+        hist_items = [it for it in self.store.q(
+            "SELECT i.* FROM export_items i JOIN exports x ON x.id=i.export_id WHERE x.reverted_at IS NULL")
+            if visible is None or it["doc_id"] in visible]
+        cur = sorted({e["effective"]["currency"] for e in items}
+                     | {r["currency"] for r in hist_items}
+                     or {"CHF"})
+
+        def zero():
+            return {c: Decimal(0) for c in cur}
+
+        kpi = {"open": zero(), "open_count": 0, "due7": zero(), "overdue": zero(), "overdue_count": 0,
+               "held": zero(), "held_count": 0, "errors": sum(1 for e in items if e["errors"]),
+               "exportable": sum(1 for e in items if e["exportable"])}
+        creditors: dict[str, dict] = defaultdict(lambda: {"sum": zero(), "count": 0, "oldest_due": None})
+        weeks = [(today - timedelta(days=today.weekday())) + timedelta(weeks=i) for i in range(8)]
+        buckets = [{"key": "overdue", "label": "Überfällig", "sum": zero()}] + [
+            {"key": w.isoformat(), "label": f"KW {w.isocalendar()[1]}", "from": w.isoformat(), "sum": zero()}
+            for w in weeks] + [{"key": "later", "label": "Später", "sum": zero()}]
+
+        for e in items:
+            ccy = e["effective"]["currency"]
+            if e["_amount"] is None:
+                continue
+            # Zahlungseinheiten: offene Raten oder die ganze Rechnung
+            due_inv = to_date(e["due_date"])
+            if e["split"]:
+                units = [(p["_amount"], p["_date"], p["_date"]) for p in e["_parts"]
+                         if not p["exported"] and p["_amount"] and p["_date"]]
+            else:
+                units = [(e["_amount"], e["_exec"], due_inv)]
+            rest = sum((u[0] for u in units), Decimal(0))
+            if e["held"]:
+                kpi["held"][ccy] += rest
+                kpi["held_count"] += 1
+                continue
+            kpi["open"][ccy] += rest
+            kpi["open_count"] += 1
+            if not e["split"] and due_inv and due_inv < today:
+                kpi["overdue"][ccy] += rest
+                kpi["overdue_count"] += 1
+            name = e["effective"]["creditor"]["name"] or e["correspondent"] or e["title"]
+            c = creditors[name]
+            c["sum"][ccy] += rest
+            c["count"] += 1
+            for amt, ex, due in units:
+                if due and due <= today + timedelta(days=7):
+                    kpi["due7"][ccy] += amt
+                if due and (c["oldest_due"] is None or due.isoformat() < c["oldest_due"]):
+                    c["oldest_due"] = due.isoformat()
+                # Liquidität nach Ausführungsdatum
+                if not e["split"] and due and due < today:
+                    b = buckets[0]
+                elif ex >= weeks[-1] + timedelta(weeks=1):
+                    b = buckets[-1]
+                else:
+                    b = buckets[1 + max(0, (ex - weeks[0]).days // 7)]
+                b["sum"][ccy] += amt
+
+        # Historie (letzte 12 Monate, nach Ausführungsdatum)
+        start = date(today.year - (1 if today.month < 12 else 0), (today.month % 12) + 1, 1)
+        months = []
+        d = start
+        while d <= today:
+            months.append(d.strftime("%Y-%m"))
+            d = date(d.year + (d.month == 12), d.month % 12 + 1, 1)
+        hist = {m: zero() for m in months}
+        top: dict[str, dict] = defaultdict(lambda: {"sum": zero(), "count": 0})
+        for it in hist_items:
+            if it["exec_date"] < start.isoformat():
+                continue
+            m = it["exec_date"][:7]
+            a = to_amount(it["amount"]) or Decimal(0)
+            if m in hist:
+                hist[m].setdefault(it["currency"], Decimal(0))
+                hist[m][it["currency"]] += a
+            t = top[it["creditor"]]
+            t["sum"].setdefault(it["currency"], Decimal(0))
+            t["sum"][it["currency"]] += a
+            t["count"] += 1
+
+        issues = [{"doc_id": e["doc_id"], "title": e["title"],
+                   "creditor": e["effective"]["creditor"]["name"] or e["correspondent"],
+                   "kind": "duplicate" if e["duplicate"] and not e["overrides"].get("dup_ok")
+                   else ("scan" if e["scan_error"] else "error"),
+                   "messages": e["errors"]} for e in items if e["errors"]]
+
+        def ser(d):
+            return {k: str(v.quantize(Decimal("0.01"))) for k, v in d.items()}
+
+        return {
+            "currencies": cur, "today": today.isoformat(),
+            "kpi": {k: ser(v) if isinstance(v, dict) else v for k, v in kpi.items()},
+            "creditors": sorted(({"name": k, "sum": ser(v["sum"]), "count": v["count"],
+                                  "oldest_due": v["oldest_due"]} for k, v in creditors.items()),
+                                key=lambda x: -sum(Decimal(s) for s in x["sum"].values())),
+            "liquidity": [{**b, "sum": ser(b["sum"])} for b in buckets],
+            "history": [{"month": m, "sum": ser(v)} for m, v in hist.items()],
+            "top_creditors": sorted(({"name": k, "sum": ser(v["sum"]), "count": v["count"]}
+                                     for k, v in top.items()),
+                                    key=lambda x: -sum(Decimal(s) for s in x["sum"].values()))[:10],
+            "issues": issues,
+        }
+
+
+def apply_duplicates(e: dict, idx: dict) -> None:
+    """Duplikatprüfung auf ein fertig berechnetes Ergebnis anwenden (Raten derselben Rechnung zählen nicht)."""
+    if not e["_dupkey"] or e["status"] != "open":
+        return
+    iban, ref, amount, _ = e["_dupkey"]
+    cands = idx.get(e["_dupkey"], [])
+    if not ref:  # ohne Referenz: Historie kennt die Mitteilung nicht -> IBAN + Betrag vergleichen
+        cands = cands + idx.get((iban, "", amount, "*"), [])
+    dups = [o for o in cands if o.get("doc_id") != e["doc_id"]]
+    if not dups:
+        return
+    txt = "; ".join(f"bereits bezahlt mit Export #{d['export_id']} ({d['exec_date']})" if d["kind"] == "paid"
+                    else f"gleich wie Dokument #{d['doc_id']}" for d in dups)
+    e["duplicate"] = True
+    if e["overrides"].get("dup_ok"):
+        e["warnings"].append(f"Mögliches Duplikat bestätigt: {txt}")
+        return
+    e["errors"].append(f"Mögliches Duplikat: {txt}")
+    e["exportable"] = False
+    for p in e["_parts"]:
+        p["exportable"] = False
+    for p in e["parts"]:
+        p["exportable"] = False
+
+
+def paid_key(iban: str, reference: str, amount: Decimal | None) -> tuple:
+    """Schlüssel für bereits exportierte Zahlungen (Mitteilung ist dort nicht gespeichert)."""
+    return (iban, reference, str(amount), "") if reference else (iban, "", str(amount), "*")
+
+
+def dup_key(iban: str, reference: str, amount: Decimal | None, message: str) -> tuple:
+    """Gleiche Zahlung = gleiche IBAN + Referenz + Betrag (ohne Referenz: + Mitteilung)."""
+    return (iban, reference or "", str(amount), "" if reference else (message or "").strip().lower())
+
+
+def bill_to_dict(b: QRBill) -> dict:
+    c = b.creditor
+    if c.adr_type == "K":
+        m = re.match(r"^\s*(\d{4,5})\s+(.+)$", c.building_or_line2)
+        cred = {"name": c.name, "street": c.street_or_line1, "building": "",
+                "postal_code": m.group(1) if m else "", "town": m.group(2) if m else c.building_or_line2,
+                "country": c.country, "combined": True}
+    else:
+        cred = {"name": c.name, "street": c.street_or_line1, "building": c.building_or_line2,
+                "postal_code": c.postal_code, "town": c.town, "country": c.country, "combined": False}
+    return {"iban": b.iban, "qr_iban": b.is_qr_iban if b.iban else False, "currency": b.currency,
+            "amount": str(b.amount) if b.amount is not None else None,
+            "ref_type": b.ref_type, "reference": b.reference, "message": b.message,
+            "bill_info": b.bill_info, "creditor": cred}

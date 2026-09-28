@@ -1,0 +1,30 @@
+# /etc/systemd/system/qr2pain-web.service
+[Unit]
+Description=qr2pain Webfrontend (QR-Rechnungen aus paperless-ngx -> pain.001)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=qr2pain
+Group=qr2pain
+WorkingDirectory=/opt/qr2pain
+Environment=QR2PAIN_CONFIG=/etc/qr2pain/config.toml
+Environment=QR2PAIN_DATA=/var/lib/qr2pain
+# Genau EIN Worker: Sessions und Sync-Status liegen im Arbeitsspeicher
+ExecStart=/opt/qr2pain/.venv/bin/uvicorn qr2pain.web.app:app \
+    --host 127.0.0.1 --port 8010 --workers 1 --proxy-headers --forwarded-allow-ips 127.0.0.1
+Restart=on-failure
+
+# Härtung
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/qr2pain
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

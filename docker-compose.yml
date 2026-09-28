@@ -1,0 +1,25 @@
+# qr2pain neben paperless-ngx (z. B. als Stack in Portainer)
+#
+# 1. config.toml aus config.example.toml erstellen und den Pfad unten anpassen
+#    (Portainer braucht einen absoluten Pfad, die Datei muss existieren – sonst legt Docker einen Ordner an)
+# 2. Netzwerknamen von paperless eintragen:  docker network ls
+# 3. In config.toml:  [paperless] url = "http://<paperless-webserver-container>:8000"
+services:
+  qr2pain:
+    image: ghcr.io/smue2012/qr2pain:latest
+    restart: unless-stopped
+    volumes:
+      - /pfad/zu/qr2pain/config.toml:/config/config.toml:ro
+      - qr2pain-data:/data            # Datenbank: Korrekturen, Exporte, Protokoll -> ins Backup
+    ports:
+      - "8012:8010"                   # links frei wählbar, rechts immer 8010
+    networks:
+      - paperless
+
+volumes:
+  qr2pain-data:
+
+networks:
+  paperless:
+    external: true
+    name: paperless-ngx_default

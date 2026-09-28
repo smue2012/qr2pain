@@ -1,0 +1,19 @@
+# Konfiguration mit IBAN/Token – niemals einchecken
+config.toml
+*.local.toml
+# Laufzeitdaten
+data/
+*.sqlite
+*.sqlite-*
+pain001_*.xml
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+tests/out/
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store

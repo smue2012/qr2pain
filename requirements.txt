@@ -1,0 +1,7 @@
+requests>=2.31
+pypdfium2>=4.30
+zxing-cpp>=2.2
+Pillow>=10.0
+# Webfrontend
+fastapi>=0.110
+uvicorn[standard]>=0.29

@@ -1,0 +1,23 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:        # wird vom Docker-Workflow vor dem Build aufgerufen
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Systempakete (Cairo für Test-PDFs)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libcairo2
+      - name: Abhängigkeiten
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Tests (Parser, pain.001-Schema, Kommandozeile, Webfrontend mit Rechten und Raten)
+        run: pytest -q

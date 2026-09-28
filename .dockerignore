@@ -1,0 +1,8 @@
+.git
+.github
+tests
+deploy
+*.md
+config.toml
+data
+**/__pycache__

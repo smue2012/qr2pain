@@ -6,6 +6,7 @@ Start:  QR2PAIN_CONFIG=/etc/qr2pain/config.toml uvicorn qr2pain.web.app:app --ho
 from __future__ import annotations
 
 import io
+import json
 import os
 import secrets
 import threading
@@ -72,6 +73,7 @@ async def security_headers(request: Request, call_next):
 class Session:
     def __init__(self, sid: str, data: dict):
         self.sid, self.user, self.token = sid, data["user"], data["token"]
+        self.superuser = bool(data.get("superuser"))
 
     def paperless(self) -> Paperless:
         return Paperless(PCFG["url"], self.token, PCFG.get("verify_tls", True),
@@ -158,7 +160,7 @@ def login(body: Login, request: Request, response: Response):
         raise HTTPException(502, f"paperless nicht erreichbar: {e}") from e
     sid = secrets.token_urlsafe(32)
     sessions[sid] = {"user": body.username, "token": token, "api": pl.api_version,
-                     "exp": time.time() + SESSION_SECONDS}
+                     "superuser": pl.is_superuser(), "exp": time.time() + SESSION_SECONDS}
     # "auto": Secure-Flag nur bei HTTPS (direkt oder via Reverse Proxy mit X-Forwarded-Proto)
     sec = WEB.get("secure_cookie", "auto")
     secure = request.url.scheme == "https" if sec == "auto" else bool(sec)
@@ -181,8 +183,7 @@ def logout(request: Request, response: Response):
 @app.get("/api/me")
 def me(s: Session = Depends(session)):
     pub = PCFG.get("public_url", PCFG["url"]).rstrip("/")
-    return {"user": s.user, "paperless_url": pub,
-            "debtor": {"name": CFG["debtor"]["name"], "iban": CFG["debtor"]["iban"]}}
+    return {"user": s.user, "paperless_url": pub, "superuser": s.superuser, "version": __version__}
 
 
 # ============================================================ Rechnungen
@@ -323,13 +324,14 @@ def sync_status(s: Session = Depends(session)):
 class ExportReq(BaseModel):
     ids: list[int | str] = []     # 101 = ganze Rechnung, "101:2" = Rate 2
     items: list[str] = []
+    accounts: dict[str, int | None] = {}   # Übersteuerung: {"<Konto-ID>"|"none": Ziel-Konto-ID}
 
 
 @app.post("/api/exports")
 def create_export(body: ExportReq, s: Session = Depends(session)):
     access.require(s, {str(i).partition(":")[0] for i in [*body.ids, *body.items]})
     try:
-        return engine.export(s.paperless(), s.user, [*body.ids, *body.items])
+        return engine.export(s.paperless(), s.user, [*body.ids, *body.items], body.accounts)
     except ValueError as e:
         _err(e, 409)
 
@@ -343,8 +345,10 @@ def exports(s: Session = Depends(session)):
                       "FROM export_items ORDER BY rowid"):
         items.setdefault(it.pop("export_id"), []).append(it)
     out = []
-    for r in store.q("SELECT id, msg_id, created_at, created_by, filename, reverted_at, reverted_by "
-                     "FROM exports ORDER BY id DESC"):
+    acc_names = {a["id"]: {"label": a["label"], "iban": a["iban"]} for a in store.accounts()}
+    for r in store.q("SELECT id, msg_id, created_at, created_by, filename, reverted_at, reverted_by, "
+                     "account_id, debtor FROM exports ORDER BY id DESC"):
+        r["account"] = json.loads(r.pop("debtor") or "null") or acc_names.get(r["account_id"])
         its = items.get(r["id"], [])
         mine = [i for i in its if i["doc_id"] in vis]
         if not mine:
@@ -387,8 +391,70 @@ def revert_export(export_id: int, s: Session = Depends(session)):
 # ============================================================ Auswertungen
 
 @app.get("/api/stats")
-def stats(s: Session = Depends(session)):
-    return engine.stats(access.visible(s))
+def stats(account: str | None = None, s: Session = Depends(session)):
+    return engine.stats(access.visible(s), account)
+
+
+# ============================================================ Konten
+
+def require_superuser(s: Session = Depends(session)) -> Session:
+    if not s.superuser:
+        raise HTTPException(403, "Nur paperless-Superuser dürfen Konten verwalten")
+    return s
+
+
+@app.get("/api/accounts")
+def accounts(s: Session = Depends(session)):
+    out = store.accounts()
+    used = {r["account_id"] for r in store.q("SELECT DISTINCT account_id FROM exports")}
+    for a in out:
+        a["used"] = a["id"] in used
+    return out
+
+
+@app.post("/api/accounts")
+def create_account(data: dict, s: Session = Depends(require_superuser)):
+    try:
+        return engine.save_account(s.user, data)
+    except ValueError as e:
+        _err(e)
+
+
+@app.patch("/api/accounts/{account_id}")
+def update_account(account_id: int, data: dict, s: Session = Depends(require_superuser)):
+    try:
+        return engine.save_account(s.user, data, account_id)
+    except KeyError:
+        raise HTTPException(404, "Nicht gefunden")
+    except ValueError as e:
+        _err(e)
+
+
+@app.delete("/api/accounts/{account_id}")
+def delete_account(account_id: int, s: Session = Depends(require_superuser)):
+    try:
+        return {"result": engine.delete_account(s.user, account_id)}
+    except KeyError:
+        raise HTTPException(404, "Nicht gefunden")
+
+
+_names_cache: dict[tuple[str, str], tuple[float, list]] = {}
+
+
+@app.get("/api/paperless/{kind}")
+def paperless_names(kind: str, s: Session = Depends(session)):
+    """Namen für Vorschläge bei den Kontoregeln (mit den Rechten des Benutzers)."""
+    if kind not in ("tags", "correspondents", "storage_paths"):
+        raise HTTPException(404, "Nicht gefunden")
+    hit = _names_cache.get((s.sid, kind))
+    if hit and hit[0] > time.time():
+        return hit[1]
+    try:
+        names = sorted(s.paperless().names(kind).values(), key=str.lower)
+    except requests.RequestException as e:
+        raise HTTPException(502, f"paperless nicht erreichbar ({e})") from e
+    _names_cache[(s.sid, kind)] = (time.time() + 300, names)
+    return names
 
 
 # ============================================================ Betrieb

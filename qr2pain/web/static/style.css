@@ -281,3 +281,38 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform
 .statusbar a { color: var(--text-3); text-decoration: none; font-variant-numeric: tabular-nums; }
 .statusbar a:hover { color: var(--text-2); text-decoration: underline; }
 @media (max-width: 900px) { .statusbar { left: 16px; bottom: 4px; } }
+
+/* ---------- Zahlungskonten */
+.acc-filter { width: auto; max-width: 220px; min-height: 34px; padding: 5px 10px; }
+.toolbar .spacer { flex: 1; }
+.acc-tag { display: inline-block; font-size: 12px; padding: 1px 7px; border-radius: 6px; background: var(--surface-2);
+  color: var(--text-2); white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
+.acc-tag.none { color: var(--warning-ink); background: var(--warning-soft); }
+.acc-intro { margin: -4px 0 14px; max-width: 900px; }
+.acc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.acc-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px;
+  display: grid; gap: 8px; align-content: start; }
+.acc-card.inactive { opacity: .6; }
+.acc-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+.acc-label { font-weight: 650; font-size: 15px; }
+.acc-rules { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.acc-actions { display: flex; gap: 8px; margin-top: 4px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 4px 1px 8px; border-radius: 10px;
+  background: var(--accent-soft); color: var(--accent); }
+.acc-card .chip { padding-right: 8px; }
+.chip button { border: 0; background: none; color: inherit; cursor: pointer; font-size: 14px; line-height: 1; padding: 0 4px; }
+.acc-form { max-height: 62vh; overflow: auto; padding-right: 4px; }
+.rules-fs { grid-column: 1 / -1; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 0; display: grid; gap: 8px; }
+.rules-fs legend { padding: 0 4px; margin: 0; }
+.rule-row { display: grid; grid-template-columns: 120px 1fr; gap: 4px 10px; align-items: center; }
+.rule-row .chips { display: flex; flex-wrap: wrap; gap: 4px; min-height: 0; }
+.rule-row .chips:empty { display: none; }
+.rule-row input { grid-column: 2; min-height: 32px; padding: 4px 8px; }
+.rule-lbl { font-size: 12.5px; color: var(--text-2); grid-row: span 2; align-self: start; padding-top: 6px; }
+.modal-card { width: min(640px, 100%); }
+.exp-group { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; display: grid; gap: 8px; }
+.exp-group .grid th, .exp-group .grid td { padding: 5px 8px; }
+.file-list { list-style: none; padding: 0; display: grid; gap: 8px; }
+.file-list li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+@media (max-width: 1200px) { .hide-md { display: none; } }
+@media (max-width: 900px) { .rule-row { grid-template-columns: 1fr; } .rule-lbl { grid-row: auto; padding: 0; } .rule-row input { grid-column: 1; } }

@@ -29,6 +29,7 @@
         <button role="tab" data-view="payments" aria-selected="true">Zahlungen <span id="count-open" class="pill"></span></button>
         <button role="tab" data-view="stats">Auswertungen</button>
         <button role="tab" data-view="exports">Exporte</button>
+        <button role="tab" data-view="accounts">Konten</button>
       </nav>
       <div class="topbar-right">
         <span id="sync-status" class="muted small"></span>
@@ -47,6 +48,7 @@
           <button data-f="held">Zurückgestellt <span class="pill" data-c="held"></span></button>
           <button data-f="all">Alle offenen <span class="pill" data-c="all"></span></button>
         </div>
+        <select id="acc-filter" class="acc-filter" aria-label="Belastungskonto filtern"></select>
         <input id="search" type="search" placeholder="Suchen: Empfänger, Referenz, Dokument…" aria-label="Suchen">
       </div>
       <div class="table-wrap">
@@ -59,6 +61,7 @@
               <th data-sort="due">Fällig</th>
               <th data-sort="exec">Ausführung</th>
               <th data-sort="amount" class="num">Betrag</th>
+              <th data-sort="account" class="hide-md">Konto</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -80,6 +83,7 @@
       <div class="toolbar">
         <h2>Auswertungen</h2>
         <div class="seg" id="ccy" aria-label="Währung"></div>
+        <select id="stats-acc" class="acc-filter" aria-label="Belastungskonto"></select>
       </div>
       <div class="tiles" id="tiles"></div>
       <div class="cards">
@@ -104,6 +108,19 @@
           <div id="issues"></div>
         </article>
       </div>
+    </section>
+
+    <!-- Konten -->
+    <section id="view-accounts" class="view" hidden>
+      <div class="toolbar">
+        <h2>Zahlungskonten</h2>
+        <span class="spacer"></span>
+        <button class="btn primary" id="btn-acc-new" hidden>Konto hinzufügen</button>
+      </div>
+      <p class="muted small acc-intro">Jede Rechnung erhält automatisch ein Belastungskonto: zuerst nach Währung, dann nach den
+        Regeln (Tag, Korrespondent oder Speicherpfad in paperless), sonst das Standardkonto. Beim Export lässt sich das Konto
+        pro Gruppe übersteuern. Pro Konto entsteht eine eigene pain.001-Datei.</p>
+      <div id="accounts" class="acc-grid"></div>
     </section>
 
     <!-- Exporte -->

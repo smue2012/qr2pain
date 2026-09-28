@@ -1,6 +1,7 @@
 """Geschäftslogik des Webfrontends: Sync aus paperless, Korrekturen, Export, Auswertungen."""
 from __future__ import annotations
 
+import json
 import re
 import threading
 from collections import defaultdict
@@ -16,7 +17,7 @@ import requests
 from .. import pain001
 from ..paperless import Paperless
 from ..qrscan import find_swiss_qr
-from ..swissqr import Address, QRBill, QRBillError, parse, validate
+from ..swissqr import Address, QRBill, QRBillError, iban_valid, is_qr_iban, parse, validate
 from .store import Store, now
 
 CREDITOR_KEYS = ("name", "street", "building", "postal_code", "town", "country")
@@ -98,6 +99,7 @@ class Engine:
         self._snap: tuple | None = None
         self._snap_lock = threading.Lock()
         self.download_workers = int(w.get("download_workers", 4))
+        self.import_config_account()
 
     # ---------------------------------------------------------------- Ausführungsdatum
     def default_exec_date(self, due: date | None, today: date | None = None) -> date:
@@ -126,8 +128,11 @@ class Engine:
             out[r["doc_id"]][r["part"]] = r
         return out
 
-    def effective(self, row: dict, dup_index: dict | None = None, paid: dict | None = None) -> dict:
+    def effective(self, row: dict, dup_index: dict | None = None, paid: dict | None = None,
+                  accounts: list[dict] | None = None) -> dict:
         ov = row["overrides"]
+        if accounts is None:
+            accounts = self.store.accounts(active_only=True)
         if paid is None:
             paid = self.paid_parts(row["doc_id"])
         paid_here = paid.get(row["doc_id"], {})
@@ -240,6 +245,10 @@ class Engine:
         elif due and exec_date and exec_date > due and row["status"] == "open":
             warnings.append(f"Zahlung erfolgt nach Fälligkeit ({due:%d.%m.%Y})")
 
+        account = resolve_account(row, bill.currency, accounts)
+        if not account and row["status"] == "open":
+            warnings.append("Kein Belastungskonto zugeordnet – beim Export wählen")
+
         eff = bill_to_dict(bill)
         eff.update(amount=str(amount) if amount is not None else None,
                    execution_date=exec_date.isoformat() if exec_date else None)
@@ -258,6 +267,7 @@ class Engine:
             "overridden": sorted(k for k in ov if k not in ("comment", "dup_ok", "installments")),
             "errors": errors, "warnings": warnings, "duplicate": False,
             "exportable": exportable,
+            "account": account, "tags": row.get("tags") or [], "storage_path": row.get("storage_path"),
             "split": bool(parts), "parts": [{k: v for k, v in p.items() if not k.startswith("_")} for p in parts],
             "parts_done": sum(p["exported"] for p in parts),
             "open_amount": str(open_amount) if open_amount is not None else None,
@@ -273,7 +283,8 @@ class Engine:
     def dup_index(self, paid: dict | None = None, effs: list[dict] | None = None) -> dict:
         paid = self.paid_parts() if paid is None else paid
         if effs is None:
-            effs = [self.effective(r, paid=paid) for r in self.store.invoices("status='open'")]
+            accounts = self.store.accounts(active_only=True)
+            effs = [self.effective(r, paid=paid, accounts=accounts) for r in self.store.invoices("status='open'")]
         idx: dict[tuple, list[dict]] = defaultdict(list)
         for e in effs:
             if e["status"] == "open" and e["_dupkey"]:
@@ -308,7 +319,8 @@ class Engine:
             if self._snap and self._snap[0] == key:
                 return self._snap[1]
             paid = self.paid_parts()
-            effs = {r["doc_id"]: self.effective(r, None, paid) for r in self.store.invoices()}
+            accounts = self.store.accounts(active_only=True)
+            effs = {r["doc_id"]: self.effective(r, None, paid, accounts) for r in self.store.invoices()}
             idx = self.dup_index(paid, list(effs.values()))
             for e in effs.values():
                 apply_duplicates(e, idx)
@@ -426,6 +438,8 @@ class Engine:
             due_f = pl.custom_field_id(w["due_field"]) if w.get("due_field") else None
             amt_f = pl.custom_field_id(self.cfg["amount_field"]) if self.cfg.get("amount_field") else None
             corr = pl.names("correspondents")
+            tag_names = pl.names("tags")
+            spaths = pl.names("storage_paths")
 
             docs = list(pl.documents([pending], [exported]))
             st["total"] = len(docs)
@@ -439,6 +453,8 @@ class Engine:
                             asn=doc.get("archive_serial_number"),
                             due_date=cf.get(due_f) if due_f else None,
                             pl_amount=str(cf.get(amt_f)) if amt_f and cf.get(amt_f) else None,
+                            tags=json.dumps(sorted(tag_names.get(t, str(t)) for t in doc.get("tags", []))),
+                            storage_path=spaths.get(doc.get("storage_path")),
                             synced_at=now())
                 row = self.store.invoice(doc["id"])
                 if row and row["status"] == "exported":
@@ -513,8 +529,12 @@ class Engine:
             self._sync_lock.release()
 
     # ---------------------------------------------------------------- Export
-    def export(self, pl: Paperless, user: str, items: list) -> dict:
-        """items: Dokument-IDs (ganze Rechnung) bzw. "doc:rate" für einzelne Raten."""
+    def export(self, pl: Paperless, user: str, items: list, account_map: dict | None = None) -> dict:
+        """items: Dokument-IDs (ganze Rechnung) bzw. "doc:rate" für einzelne Raten.
+
+        account_map: Übersteuerung pro Gruppe {"<zugeordnete Konto-ID>" | "none": Ziel-Konto-ID}.
+        Pro Belastungskonto entsteht eine eigene pain.001-Datei."""
+        account_map = {str(k): v for k, v in (account_map or {}).items() if v not in (None, "")}
         paid = self.paid_parts()
         idx = self.dup_index(paid)
         wanted: dict[int, set[int]] = defaultdict(set)
@@ -567,39 +587,69 @@ class Engine:
         if not units:
             raise ValueError(["Keine Rechnungen ausgewählt"])
 
-        payments = []
+        # Belastungskonto pro Zahlung: automatische Zuordnung, ggf. übersteuert
+        accounts = {a["id"]: a for a in self.store.accounts(active_only=True)}
+        groups: dict[int, list] = defaultdict(list)
         for e, p in units:
-            e2e = f"PL{e['doc_id']}" + (f"-ASN{e['asn']}" if e["asn"] else "")
-            if p:
-                b = e["_bill"]
-                msg = f"Teilzahlung {p['no']}/{p['of']}" + (f" {b.message}" if b.message else "")
-                payments.append(pain001.Payment(replace(b, message=msg[:140]), f"{e2e}-T{p['no']}",
-                                                p["_amount"], p["_date"]))
+            auto = e["account"]["id"] if e["account"] else None
+            target = account_map.get(str(auto) if auto else "none", auto)
+            try:
+                target = int(target) if target is not None else None
+            except (TypeError, ValueError):
+                target = None
+            acc = accounts.get(target)
+            label = f"#{e['doc_id']} {e['effective']['creditor']['name'] or e['title']}"
+            if not acc:
+                problems.append(f"{label}: kein Belastungskonto gewählt")
+            elif acc["currency"] and acc["currency"] != e["effective"]["currency"]:
+                problems.append(f"{label}: Konto «{acc['label']}» ist nur für {acc['currency']}")
             else:
-                payments.append(pain001.Payment(e["_bill"], e2e, e["_amount"], e["_exec"]))
-        debtor = pain001.Debtor(**self.cfg["debtor"])
-        xml = pain001.build(debtor, payments, next_business_day(date.today()),
-                            self.cfg.get("initiating_party"))
-        msg_id = re.search(rb"<MsgId>([^<]+)</MsgId>", xml).group(1).decode()
-        filename = f"pain001_{datetime.now():%Y%m%d_%H%M%S}.xml"
+                groups[acc["id"]].append((e, p))
+        if problems:
+            raise ValueError(problems)
 
+        runs = []   # (konto, units, payments, xml, msg_id)
+        for acc_id, grp in groups.items():
+            acc = accounts[acc_id]
+            payments = []
+            for e, p in grp:
+                e2e = f"PL{e['doc_id']}" + (f"-ASN{e['asn']}" if e["asn"] else "")
+                if p:
+                    b = e["_bill"]
+                    msg = f"Teilzahlung {p['no']}/{p['of']}" + (f" {b.message}" if b.message else "")
+                    payments.append(pain001.Payment(replace(b, message=msg[:140]), f"{e2e}-T{p['no']}",
+                                                    p["_amount"], p["_date"]))
+                else:
+                    payments.append(pain001.Payment(e["_bill"], e2e, e["_amount"], e["_exec"]))
+            xml = pain001.build(account_debtor(acc), payments, next_business_day(date.today()),
+                                self.cfg.get("initiating_party") or acc["name"])
+            msg_id = re.search(rb"<MsgId>([^<]+)</MsgId>", xml).group(1).decode()
+            runs.append((acc, grp, payments, xml, msg_id))
+
+        created, doc_export = [], {}
         complete, partial = [], []
         with self.store.tx() as s:
-            cur = s.db.execute("INSERT INTO exports (msg_id, created_at, created_by, filename, xml) "
-                               "VALUES (?,?,?,?,?)", (msg_id, now(), user, filename, xml))
-            export_id = cur.lastrowid
-            filename = f"pain001_{datetime.now():%Y%m%d_%H%M}_E{export_id}.xml"
-            s.db.execute("UPDATE exports SET filename=? WHERE id=?", (filename, export_id))
-            for (e, p), pay in zip(units, payments):
-                b = e["_bill"]
-                s.db.execute("INSERT INTO export_items (export_id, doc_id, creditor, iban, reference, currency, "
-                             "amount, exec_date, part) VALUES (?,?,?,?,?,?,?,?,?)",
-                             (export_id, e["doc_id"], b.creditor.name, b.iban, b.reference, b.currency,
-                              str(pay.amount), pay.execution_date.isoformat(), p["no"] if p else 0))
-                what = f"Rate {p['no']}/{p['of']}, " if p else ""
-                s.db.execute("INSERT INTO audit (ts,user,doc_id,action,detail) VALUES (?,?,?,?,?)",
-                             (now(), user, e["doc_id"], "Exportiert",
-                              f"Export #{export_id}, {what}{b.currency} {pay.amount}, Ausführung {pay.execution_date}"))
+            for acc, grp, payments, xml, msg_id in runs:
+                snap = json.dumps({k: acc[k] for k in ("label", "name", "iban", "bic", "currency")})
+                cur = s.db.execute("INSERT INTO exports (msg_id, created_at, created_by, filename, xml, account_id, debtor) "
+                                   "VALUES (?,?,?,?,?,?,?)", (msg_id, now(), user, "", xml, acc["id"], snap))
+                export_id = cur.lastrowid
+                filename = f"pain001_{datetime.now():%Y%m%d_%H%M}_E{export_id}_{slug(acc['label'])}.xml"
+                s.db.execute("UPDATE exports SET filename=? WHERE id=?", (filename, export_id))
+                for (e, p), pay in zip(grp, payments):
+                    b = e["_bill"]
+                    s.db.execute("INSERT INTO export_items (export_id, doc_id, creditor, iban, reference, currency, "
+                                 "amount, exec_date, part) VALUES (?,?,?,?,?,?,?,?,?)",
+                                 (export_id, e["doc_id"], b.creditor.name, b.iban, b.reference, b.currency,
+                                  str(pay.amount), pay.execution_date.isoformat(), p["no"] if p else 0))
+                    what = f"Rate {p['no']}/{p['of']}, " if p else ""
+                    s.db.execute("INSERT INTO audit (ts,user,doc_id,action,detail) VALUES (?,?,?,?,?)",
+                                 (now(), user, e["doc_id"], "Exportiert",
+                                  f"Export #{export_id} ({acc['label']}), {what}{b.currency} {pay.amount}, "
+                                  f"Ausführung {pay.execution_date}"))
+                    doc_export[e["doc_id"]] = (export_id, filename)
+                created.append({"id": export_id, "filename": filename, "count": len(grp),
+                                "account": {"id": acc["id"], "label": acc["label"], "iban": acc["iban"]}})
             for doc in dict.fromkeys(e["doc_id"] for e, _ in units):
                 e = next(e for e, _ in units if e["doc_id"] == doc)
                 if e["split"]:
@@ -609,15 +659,107 @@ class Engine:
                     if n_done < len(e["_parts"]):
                         partial.append((doc, n_done, len(e["_parts"])))
                         continue
-                s.db.execute("UPDATE invoices SET status='exported', export_id=? WHERE doc_id=?", (export_id, doc))
+                s.db.execute("UPDATE invoices SET status='exported', export_id=? WHERE doc_id=?",
+                             (doc_export[doc][0], doc))
                 complete.append(doc)
 
-        note = f"Zahlung exportiert in {filename} (Export #{export_id}) durch {user}"
-        warnings = self._tag(pl, complete, exported=True, note=note)
+        warnings = []
+        for doc in complete:
+            ex_id, fn = doc_export[doc]
+            warnings += self._tag(pl, [doc], exported=True, note=f"Zahlung exportiert in {fn} (Export #{ex_id}) durch {user}")
         for doc, n_done, n in partial:
-            warnings += self._note(pl, doc, f"Teilzahlung exportiert in {filename} (Export #{export_id}), "
+            ex_id, fn = doc_export[doc]
+            warnings += self._note(pl, doc, f"Teilzahlung exportiert in {fn} (Export #{ex_id}), "
                                             f"{n_done} von {n} Raten erledigt – durch {user}")
-        return {"id": export_id, "filename": filename, "count": len(units), "warnings": warnings}
+        return {"exports": created, "count": len(units), "warnings": warnings,
+                # Kompatibilität mit 1.3: erster Export
+                "id": created[0]["id"], "filename": created[0]["filename"]}
+
+    # ---------------------------------------------------------------- Konten
+    ACCOUNT_FIELDS = ("label", "name", "iban", "bic", "street", "building", "postal_code", "town", "country",
+                      "currency", "rules", "is_default", "sort", "active")
+
+    def import_config_account(self) -> None:
+        """Beim ersten Start mit Kontenverwaltung: Konto aus der config.toml übernehmen."""
+        if self.store.one("SELECT id FROM accounts LIMIT 1") or not self.cfg.get("debtor"):
+            return
+        d = self.cfg["debtor"]
+        self.store.x("INSERT INTO accounts (label,name,iban,bic,street,building,postal_code,town,country,"
+                     "is_default,sort,updated_at,updated_by) VALUES (?,?,?,?,?,?,?,?,?,1,10,?,?)",
+                     "Standard", d.get("name", ""), d.get("iban", "").replace(" ", "").upper(), d.get("bic", ""),
+                     d.get("street", ""), d.get("building", ""), d.get("postal_code", ""), d.get("town", ""),
+                     d.get("country", "CH"), now(), "config.toml")
+        acc_id = self.store.one("SELECT id FROM accounts ORDER BY id LIMIT 1")["id"]
+        self.store.x("UPDATE exports SET account_id=? WHERE account_id IS NULL", acc_id)   # bisherige Exporte
+
+    def save_account(self, user: str, data: dict, account_id: int | None = None) -> dict:
+        unknown = set(data) - set(self.ACCOUNT_FIELDS)
+        if unknown:
+            raise ValueError(f"Unbekannte Felder: {', '.join(sorted(unknown))}")
+        old = self.store.one("SELECT * FROM accounts WHERE id=?", account_id) if account_id else None
+        if account_id and not old:
+            raise KeyError(account_id)
+        acc = dict(old or {"bic": "", "street": "", "building": "", "postal_code": "", "town": "",
+                           "country": "CH", "currency": "", "rules": "{}", "is_default": 0, "sort": 100, "active": 1})
+        acc["rules"] = json.loads(acc["rules"]) if isinstance(acc["rules"], str) else acc["rules"]
+        acc.update(data)
+        # Prüfung
+        acc["label"] = (acc.get("label") or "").strip()
+        acc["name"] = (acc.get("name") or "").strip()
+        acc["iban"] = (acc.get("iban") or "").replace(" ", "").upper()
+        acc["bic"] = (acc.get("bic") or "").replace(" ", "").upper()
+        acc["country"] = (acc.get("country") or "CH").strip().upper()
+        acc["currency"] = (acc.get("currency") or "").upper()
+        if not acc["label"]:
+            raise ValueError("Bezeichnung fehlt")
+        if not acc["name"]:
+            raise ValueError("Kontoinhaber fehlt")
+        if not iban_valid(acc["iban"]):
+            raise ValueError("IBAN ungültig")
+        if is_qr_iban(acc["iban"]):
+            raise ValueError("Eine QR-IBAN kann kein Belastungskonto sein")
+        if acc["bic"] and not re.fullmatch(r"[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?", acc["bic"]):
+            raise ValueError("BIC ungültig")
+        if acc["currency"] not in ("", "CHF", "EUR"):
+            raise ValueError("Währung: leer, CHF oder EUR")
+        if not re.fullmatch(r"[A-Z]{2}", acc["country"]):
+            raise ValueError("Land: zweistelliger Code, z. B. CH")
+        rules = acc.get("rules") or {}
+        if not isinstance(rules, dict):
+            raise ValueError("Regeln ungültig")
+        acc["rules"] = {k: sorted({str(v).strip() for v in rules.get(k, []) if str(v).strip()}, key=str.lower)
+                        for k in ("tags", "correspondents", "storage_paths")}
+        acc["is_default"] = int(bool(acc.get("is_default")))
+        acc["active"] = int(bool(acc.get("active", 1)))
+        try:
+            acc["sort"] = int(acc.get("sort") or 100)
+        except (TypeError, ValueError):
+            raise ValueError("Reihenfolge muss eine Zahl sein") from None
+        cols = [c for c in self.ACCOUNT_FIELDS]
+        vals = [json.dumps(acc["rules"]) if c == "rules" else acc[c] for c in cols]
+        if account_id:
+            self.store.x(f"UPDATE accounts SET {', '.join(c + '=?' for c in cols)}, updated_at=?, updated_by=? WHERE id=?",
+                         *vals, now(), user, account_id)
+            changed = [c for c in cols if str(old[c]) != str(json.dumps(acc[c]) if c == "rules" else acc[c])]
+            self.store.audit(user, None, "Konto geändert", f"{acc['label']}: {', '.join(changed) or '–'}")
+        else:
+            account_id = self.store.x(f"INSERT INTO accounts ({', '.join(cols)}, updated_at, updated_by) "
+                                      f"VALUES ({', '.join('?' for _ in cols)}, ?, ?)", *vals, now(), user)
+            self.store.audit(user, None, "Konto angelegt", f"{acc['label']} ({acc['iban']})")
+        return next(a for a in self.store.accounts() if a["id"] == account_id)
+
+    def delete_account(self, user: str, account_id: int) -> str:
+        acc = self.store.one("SELECT * FROM accounts WHERE id=?", account_id)
+        if not acc:
+            raise KeyError(account_id)
+        if self.store.one("SELECT id FROM exports WHERE account_id=? LIMIT 1", account_id):
+            self.store.x("UPDATE accounts SET active=0, is_default=0, updated_at=?, updated_by=? WHERE id=?",
+                         now(), user, account_id)
+            self.store.audit(user, None, "Konto deaktiviert", f"{acc['label']} (wird in Exporten verwendet)")
+            return "deactivated"
+        self.store.x("DELETE FROM accounts WHERE id=?", account_id)
+        self.store.audit(user, None, "Konto gelöscht", acc["label"])
+        return "deleted"
 
     def revert(self, pl: Paperless, user: str, export_id: int) -> dict:
         ex = self.store.one("SELECT * FROM exports WHERE id=?", export_id)
@@ -690,12 +832,17 @@ class Engine:
         return warnings
 
     # ---------------------------------------------------------------- Auswertungen
-    def stats(self, visible: set[int] | None = None) -> dict:
+    def stats(self, visible: set[int] | None = None, account: str | None = None) -> dict:
+        """account: None = alle, "none" = ohne Zuordnung, sonst Konto-ID."""
         today = date.today()
-        items = self.list("open", visible)
+
+        def acc_match(acc_id):
+            return account in (None, "", "all") or (str(acc_id) if acc_id else "none") == str(account)
+
+        items = [e for e in self.list("open", visible) if acc_match(e["account"]["id"] if e["account"] else None)]
         hist_items = [it for it in self.store.q(
-            "SELECT i.* FROM export_items i JOIN exports x ON x.id=i.export_id WHERE x.reverted_at IS NULL")
-            if visible is None or it["doc_id"] in visible]
+            "SELECT i.*, x.account_id FROM export_items i JOIN exports x ON x.id=i.export_id WHERE x.reverted_at IS NULL")
+            if (visible is None or it["doc_id"] in visible) and acc_match(it["account_id"])]
         cur = sorted({e["effective"]["currency"] for e in items}
                      | {r["currency"] for r in hist_items}
                      or {"CHF"})
@@ -795,6 +942,53 @@ class Engine:
                                     key=lambda x: -sum(Decimal(s) for s in x["sum"].values()))[:10],
             "issues": issues,
         }
+
+
+def resolve_account(row: dict, currency: str, accounts: list[dict]) -> dict | None:
+    """Belastungskonto einer Rechnung bestimmen.
+
+    1. nur aktive Konten mit passender Währung (leer = alle Währungen)
+    2. Regeln: Tag, Korrespondent oder Speicherpfad aus paperless (Gross-/Kleinschreibung egal)
+    3. sonst Standardkonto; bei mehreren gewinnt die kleinere Reihenfolge-Nummer
+    """
+    tags = {t.lower() for t in (row.get("tags") or [])}
+    corr = (row.get("correspondent") or "").lower()
+    spath = (row.get("storage_path") or "").lower()
+    # passende Währung zuerst (EUR-Konto vor «alle Währungen»), dann Reihenfolge
+    eligible = sorted((a for a in accounts if not a["currency"] or a["currency"] == currency),
+                      key=lambda a: (a["currency"] != currency, a["sort"], a["id"]))
+
+    def hit(a):
+        r = a["rules"] or {}
+        for t in r.get("tags", []):
+            if t.lower() in tags:
+                return f"Tag «{t}»"
+        for c in r.get("correspondents", []):
+            if c.lower() == corr:
+                return f"Korrespondent «{c}»"
+        for sp in r.get("storage_paths", []):
+            if sp.lower() == spath:
+                return f"Speicherpfad «{sp}»"
+        return None
+
+    for a in eligible:
+        why = hit(a)
+        if why:
+            return {"id": a["id"], "label": a["label"], "why": why}
+    for a in eligible:
+        if a["is_default"]:
+            return {"id": a["id"], "label": a["label"], "why": "Standardkonto" + (f" {a['currency']}" if a["currency"] else "")}
+    return None
+
+
+def account_debtor(a: dict) -> pain001.Debtor:
+    return pain001.Debtor(name=a["name"], iban=a["iban"], bic=a["bic"], street=a["street"], building=a["building"],
+                          postal_code=a["postal_code"], town=a["town"], country=a["country"] or "CH")
+
+
+def slug(text: str) -> str:
+    t = re.sub(r"[^A-Za-z0-9]+", "-", text.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")).strip("-")
+    return t[:30] or "Konto"
 
 
 def apply_duplicates(e: dict, idx: dict) -> None:

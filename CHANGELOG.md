@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.0 – 2026-09-28
+- **Mehrere Zahlungskonten** (z. B. für getrennte Firmen): Verwaltung im neuen Tab «Konten», nur für paperless-Superuser
+- Automatische Zuordnung pro Rechnung: Währung, dann Regeln nach paperless-Tag, Korrespondent oder Speicherpfad, sonst Standardkonto
+- Export gruppiert nach Konto, Konto pro Gruppe übersteuerbar; pro Konto eine eigene pain.001-Datei
+- Kontospalte und Kontofilter in der Zahlungsliste, Kontofilter in den Auswertungen, Konto in der Exporthistorie
+- Beim Update wird das Konto aus der `config.toml` als «Standard» übernommen; bisherige Exporte werden ihm zugeordnet
+
 ## 1.3.0 – 2026-09-28
 - Statuszeile unten links mit der Programmversion (Link zu den Versionshinweisen), auch auf der Anmeldeseite
 - GitHub Actions auf aktuelle Versionen (Node.js 24) umgestellt, Runner fest auf Ubuntu 24.04

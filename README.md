@@ -71,6 +71,23 @@ bleibt erhalten und wird bei Bedarf automatisch migriert.
 - XML erneut herunterladen
 - **Export rückgängig machen**: Die Rechnungen werden wieder offen und in paperless zurückgetaggt. Nur verwenden, wenn die Datei nicht bei der Bank ausgeführt wurde.
 
+### Zahlungskonten
+
+Für getrennte Firmen oder Bereiche lassen sich im Tab **«Konten»** mehrere Belastungskonten verwalten:
+Bezeichnung, Kontoinhaber mit Adresse, IBAN, BIC, optional eine Währung. Anlegen und Ändern dürfen nur
+**paperless-Superuser**, alle anderen sehen die Konten und wählen sie beim Export aus.
+
+Jede Rechnung erhält ihr Konto automatisch:
+1. **Währung:** Ein Konto «nur EUR» kommt nur für EUR-Zahlungen in Frage, ein Konto mit passender Währung hat Vorrang.
+2. **Regeln:** paperless-Tag, Korrespondent oder Speicherpfad, z. B. Tag «Firma B» → Konto Firma B.
+3. **Standardkonto,** wenn keine Regel passt. Bei mehreren Treffern entscheidet die Reihenfolge-Nummer.
+
+Beim Export sind die Zahlungen nach Konto gruppiert. Das Konto lässt sich pro Gruppe übersteuern. **Pro Konto entsteht
+eine eigene pain.001-Datei,** die im E-Banking des jeweiligen Kontos hochgeladen wird. Konten, die schon in Exporten
+vorkommen, werden beim Löschen nur deaktiviert.
+
+Beim Update auf 1.4 wird das bisherige Konto aus `[debtor]` der `config.toml` als «Standard» übernommen.
+
 ### Ausführungsdatum
 
 Standard ist die Fälligkeit minus `lead_days`, auf den vorherigen Bankwerktag gelegt, frühestens aber

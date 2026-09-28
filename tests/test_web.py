@@ -149,3 +149,78 @@ def test_duplicates_installments_export_revert(web):
 def tag_names(web, doc_id):
     m = web["mock"]
     return [m.TAGS[t] for t in m.DOCS[doc_id]["tags"]]
+
+
+# ---------------------------------------------------------------- Zahlungskonten
+
+ACC_A = {"label": "Firma A CHF", "name": "Firma A AG", "iban": "CH93 0076 2011 6238 5295 7", "town": "Luzern", "currency": "CHF",
+         "is_default": True, "sort": 10}
+ACC_E = {"label": "Firma A EUR", "name": "Firma A AG", "iban": "CH5604835012345678009", "town": "Luzern",
+         "currency": "EUR", "is_default": True, "sort": 20}
+ACC_B = {"label": "Firma B", "name": "Firma B GmbH", "iban": "CH7609000000123456789", "town": "Zug",
+         "rules": {"tags": ["firma b"], "storage_paths": ["Firma B/Rechnungen"]}, "sort": 30}
+
+
+def test_accounts_permissions_and_validation(web):
+    st = web["client"]("stephan", "geheim")
+    bh = web["client"]("buchhaltung", "geheim2")
+    assert st.get("/api/me").json()["superuser"] and not bh.get("/api/me").json()["superuser"]
+    accs = st.get("/api/accounts").json()
+    assert [a["label"] for a in accs] == ["Standard"] and accs[0]["is_default"]   # aus config.toml übernommen
+    assert bh.post("/api/accounts", json=ACC_B).status_code == 403
+    assert bh.get("/api/accounts").status_code == 200                          # lesen darf jeder
+    for bad, msg in [({**ACC_B, "iban": "CH12 3456"}, "IBAN"), ({**ACC_B, "iban": "CH4431999123000889012"}, "QR-IBAN"),
+                     ({**ACC_B, "currency": "USD"}, "Währung"), ({**ACC_B, "label": ""}, "Bezeichnung")]:
+        r = st.post("/api/accounts", json=bad)
+        assert r.status_code == 400 and msg in r.json()["detail"][0], r.json()
+
+
+def test_accounts_assignment_and_export(web):
+    st = web["client"]("stephan", "geheim")
+    std = st.get("/api/accounts").json()[0]
+    a = st.post("/api/accounts", json=ACC_A).json()
+    e = st.post("/api/accounts", json=ACC_E).json()
+    b = st.post("/api/accounts", json=ACC_B).json()
+    assert st.patch(f"/api/accounts/{std['id']}", json={"is_default": False, "sort": 90}).status_code == 200
+    sync(st)                                          # Tags/Speicherpfad aus paperless übernehmen
+    L = {x["doc_id"]: x for x in st.get("/api/invoices").json()}
+    assert L[101]["account"]["id"] == a["id"]         # Standardkonto CHF
+    assert L[102]["account"]["id"] == e["id"]         # EUR -> EUR-Konto
+    assert L[109]["account"]["id"] == b["id"] and "Tag" in L[109]["account"]["why"]
+    assert L[110]["account"]["id"] == b["id"] and "Speicherpfad" in L[110]["account"]["why"]
+
+    # Export: 101 (A), 102 (E), 109 (B), 103 übersteuert auf B -> 3 Dateien
+    r = st.post("/api/exports", json={"items": ["101", "102", "109", "103"],
+                                      "accounts": {str(a["id"]): a["id"]}})
+    assert r.status_code == 200, r.text
+    # 103 gehört zu A; Gruppe A komplett auf A lassen -> 3 Dateien (A: 101+103, E: 102, B: 109)
+    out = r.json()
+    files = {x["account"]["label"]: x for x in out["exports"]}
+    assert set(files) == {"Firma A CHF", "Firma A EUR", "Firma B"} and files["Firma A CHF"]["count"] == 2
+    for label, x in files.items():
+        xml = st.get(f"/api/exports/{x['id']}/xml").text
+        XSD.validate(xml)
+        iban = {"Firma A CHF": "CH9300762011623852957", "Firma A EUR": "CH5604835012345678009",
+                "Firma B": "CH7609000000123456789"}[label]
+        assert f"<IBAN>{iban}</IBAN>" in xml.split("<CdtTrfTxInf>")[0], label   # Belastungskonto im B-Level
+    ex = {x["id"]: x for x in st.get("/api/exports").json()}
+    assert ex[files["Firma B"]["id"]]["account"]["label"] == "Firma B"
+    st_ = st.get(f"/api/stats?account={b['id']}").json()
+    assert st_["kpi"]["open"].get("CHF") == "318.60"                    # nur noch 110 offen bei Firma B
+    for x in out["exports"]:
+        st.post(f"/api/exports/{x['id']}/revert")
+
+    # Übersteuerung: EUR-Rechnung auf ein reines CHF-Konto ist nicht erlaubt
+    r = st.post("/api/exports", json={"items": ["102"], "accounts": {str(e["id"]): a["id"]}})
+    assert r.status_code == 409 and "nur für" in r.json()["detail"][0]
+    # Übersteuerung einer Gruppe auf anderes Konto
+    r = st.post("/api/exports", json={"items": ["103"], "accounts": {str(a["id"]): b["id"]}}).json()
+    assert r["exports"][0]["account"]["id"] == b["id"]
+    st.post(f"/api/exports/{r['id']}/revert")
+
+    # Konto mit Exporten wird beim Löschen nur deaktiviert, unbenutztes wird gelöscht
+    assert st.delete(f"/api/accounts/{b['id']}").json()["result"] == "deactivated"
+    tmp = st.post("/api/accounts", json={**ACC_B, "label": "Temp"}).json()
+    assert st.delete(f"/api/accounts/{tmp['id']}").json()["result"] == "deleted"
+    L = {x["doc_id"]: x for x in st.get("/api/invoices").json()}
+    assert L[109]["account"]["id"] == a["id"]                           # Firma B inaktiv -> Standard

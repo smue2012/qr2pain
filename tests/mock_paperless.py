@@ -70,7 +70,8 @@ SPEC = {
 DOCS = {}
 for i, (title, c, due, kw, amt) in SPEC.items():
     DOCS[i] = {
-        "id": i, "title": title, "correspondent": c, "tags": [1],
+        "id": i, "title": title, "correspondent": c, "tags": [1] + ([20] if i == 109 else []),
+        "storage_path": 1 if i == 110 else None,
         "created": (T - timedelta(days=30 - (due if due > 0 else 0) // 2)).isoformat(),
         "modified": f"{T.isoformat()}T08:00:00+02:00", "archive_serial_number": 2000 + i,
         "custom_fields": [{"field": 11, "value": (T + timedelta(days=due)).isoformat()}]
@@ -79,7 +80,8 @@ for i, (title, c, due, kw, amt) in SPEC.items():
             bytestring=b'<svg xmlns="http://www.w3.org/2000/svg" width="595" height="842">'
                        b'<text x="60" y="80" font-size="20">Rechnung (Scan ohne QR-Code)</text></svg>'),
     }
-TAGS = {1: "QR zu zahlen"}
+TAGS = {1: "QR zu zahlen", 20: "Firma B"}
+STORAGE_PATHS = {1: "Firma B/Rechnungen"}
 CORR = {1: "Robert Schneider AG", 2: "Müller & Söhne", 3: "Verein Beispiel", 4: "CKW", 5: "Hostpoint",
         6: "Lyreco", 7: "Peoplefone", 8: "Grenke"}
 FIELDS = {11: "Fällig am", 12: "Betrag"}
@@ -142,6 +144,8 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/custom_fields/":
             n = q.get("name__iexact", "").lower()
             return self._list([{"id": k, "name": v} for k, v in FIELDS.items() if not n or v.lower() == n])
+        if p == "/api/storage_paths/":
+            return self._list([{"id": k, "name": v} for k, v in STORAGE_PATHS.items()])
         if p == "/api/correspondents/":
             return self._list([{"id": k, "name": v} for k, v in CORR.items()])
         if p == "/api/profile/":

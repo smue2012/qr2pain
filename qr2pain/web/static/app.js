@@ -18,7 +18,9 @@ const compact = (v) => {
 const fmtIban = (s) => (s || "").replace(/\s+/g, "").replace(/(.{4})/g, "$1 ").trim();
 const fmtRef = (r, t) => (t === "QRR" && r ? r.replace(/^(\d{2})(\d{5})(\d{5})(\d{5})(\d{5})(\d{5})$/, "$1 $2 $3 $4 $5 $6") : r || "");
 
-const S = { me: null, list: [], filter: "ready", q: "", sort: ["due", 1], sel: new Set(), cur: null, stats: null, ccy: null };
+const S = { me: null, list: [], filter: "ready", q: "", sort: ["due", 1], sel: new Set(), cur: null, stats: null, ccy: null,
+  accounts: [], accFilter: "all", statsAcc: "all" };
+const accLabel = (id) => S.accounts.find((a) => a.id === id)?.label || "–";
 
 // ================================================================ API
 async function api(path, opts = {}) {
@@ -83,7 +85,8 @@ $("#btn-logout").addEventListener("click", async () => { await api("logout", { m
 async function start() {
   try { S.me = await api("me"); } catch { return; }
   $("#login").hidden = true; $("#app").hidden = false;
-  $("#user").textContent = S.me.user;
+  $("#user").textContent = S.me.user + (S.me.superuser ? " (Admin)" : "");
+  await loadAccounts();
   await loadList();
   pollSync(true);
 }
@@ -95,6 +98,7 @@ function showView(v) {
   $$(".view").forEach((s) => (s.hidden = s.id !== `view-${v}`));
   if (v === "stats") loadStats();
   if (v === "exports") loadExports();
+  if (v === "accounts") renderAccounts();
   if (v === "payments") loadList();
 }
 
@@ -148,6 +152,7 @@ const SORTS = {
   due: (x) => x.due_date || "9999",
   exec: (x) => x.effective.execution_date || "9999",
   amount: (x) => Number(x.effective.amount || 0),
+  account: (x) => (x.account ? x.account.label.toLowerCase() : "~"),
 };
 
 $$("#filter button").forEach((b) => b.addEventListener("click", () => {
@@ -167,6 +172,7 @@ function visible() {
   const [k, dir] = S.sort;
   return S.list
     .filter(f)
+    .filter((x) => S.accFilter === "all" || String(x.account?.id ?? "none") === S.accFilter)
     .filter((x) => !S.q || [x.effective.creditor.name, x.title, x.correspondent, x.effective.reference,
       x.effective.message, x.effective.iban, String(x.doc_id)].join(" ").toLowerCase().includes(S.q))
     .sort((a, b) => (SORTS[k](a) > SORTS[k](b) ? dir : SORTS[k](a) < SORTS[k](b) ? -dir : 0));
@@ -234,6 +240,8 @@ function renderList() {
       <td class="num"><span class="ccy">${esc(e.currency)}</span><span class="${amtChanged ? "changed-val" : ""}">${money(e.amount)}</span>
         ${x.split ? `<div class="sub">offen ${money(x.open_amount)}</div>`
           : amtChanged && o.amount ? `<div class="sub">QR ${money(o.amount)}</div>` : x.amount_source === "paperless-Feld" ? `<div class="sub">aus paperless</div>` : ""}</td>
+      <td class="hide-md">${x.account ? `<span class="acc-tag" title="${esc(x.account.why)}">${esc(x.account.label)}</span>`
+        : `<span class="acc-tag none" title="Kein Konto zugeordnet – beim Export wählen">ohne Konto</span>`}</td>
       <td>${badges(x)}</td></tr>`;
     const subs = x.split ? x.parts.map((p) => {
       const key = `${x.doc_id}:${p.no}`;
@@ -243,6 +251,7 @@ function renderList() {
         <td></td>
         <td>${dt(p.date)}</td>
         <td class="num"><span class="ccy">${esc(e.currency)}</span>${money(p.amount)}</td>
+        <td class="hide-md"></td>
         <td><div class="badges">${partBadge(x, p)}</div></td></tr>`;
     }).join("") : "";
     return main + subs;
@@ -314,37 +323,92 @@ $("#btn-export").addEventListener("click", async () => {
   const us = selUnits();
   const ok = us.filter((u) => u.ok);
   const skip = us.filter((u) => !u.ok);
-  const byDate = {};
+  // Gruppen nach zugeordnetem Konto
+  const groups = {};
   ok.forEach((u) => {
-    const k = `${u.date}|${u.ccy}`;
-    byDate[k] = byDate[k] || { n: 0, s: 0 };
-    byDate[k].n++; byDate[k].s += Number(u.amount);
+    const k = String(u.x.account?.id ?? "none");
+    (groups[k] = groups[k] || { key: k, units: [], ccys: new Set() }).units.push(u);
+    groups[k].ccys.add(u.ccy);
   });
-  const warn = ok.filter((u) => u.x.warnings.length);
+  const active = S.accounts.filter((a) => a.active);
+  const warn = ok.filter((u) => u.x.warnings.some((w) => !w.startsWith("Kein Belastungskonto")));
   const nParts = ok.filter((u) => u.part).length;
-  const html = `
-    <p>Belastungskonto <b>${esc(S.me.debtor.name)}</b>, <span class="mono">${esc(fmtIban(S.me.debtor.iban))}</span></p>
-    <table class="grid"><thead><tr><th>Ausführung</th><th>Währung</th><th class="num">Anzahl</th><th class="num">Summe</th></tr></thead><tbody>
-    ${Object.entries(byDate).sort().map(([k, v]) => { const [d, c] = k.split("|");
-      return `<tr><td>${dt(d)}</td><td>${c}</td><td class="num">${v.n}</td><td class="num">${money(v.s)}</td></tr>`; }).join("")}
-    </tbody></table>
+  const groupHtml = Object.values(groups).map((g) => {
+    const eligible = active.filter((a) => !a.currency || [...g.ccys].every((c) => c === a.currency));
+    const byDate = {};
+    g.units.forEach((u) => {
+      const k = `${u.date}|${u.ccy}`;
+      byDate[k] = byDate[k] || { n: 0, s: 0 };
+      byDate[k].n++; byDate[k].s += Number(u.amount);
+    });
+    return `<div class="exp-group">
+      <label class="f">Belastungskonto für ${g.units.length} Zahlung${g.units.length > 1 ? "en" : ""}
+        <select data-group="${g.key}">
+          ${g.key === "none" ? `<option value="">– Konto wählen –</option>` : ""}
+          ${eligible.map((a) => `<option value="${a.id}" ${String(a.id) === g.key ? "selected" : ""}>${esc(a.label)} · ${esc(fmtIban(a.iban))}${a.currency ? ` · nur ${a.currency}` : ""}</option>`).join("")}
+        </select></label>
+      <table class="grid"><thead><tr><th>Ausführung</th><th>Währung</th><th class="num">Anzahl</th><th class="num">Summe</th></tr></thead><tbody>
+      ${Object.entries(byDate).sort().map(([k, v]) => { const [d, c] = k.split("|");
+        return `<tr><td>${dt(d)}</td><td>${c}</td><td class="num">${v.n}</td><td class="num">${money(v.s)}</td></tr>`; }).join("")}
+      </tbody></table></div>`;
+  }).join("");
+  const html = `${groupHtml}
+    ${Object.keys(groups).length > 1 ? `<p class="msg info"><b>i</b><span>Es entstehen ${Object.keys(groups).length} Dateien, eine pro Belastungskonto.</span></p>` : ""}
     ${nParts ? `<p class="msg info"><b>i</b><span>${nParts} Rate${nParts > 1 ? "n" : ""} enthalten. Die Rechnung gilt in paperless erst nach der letzten Rate als exportiert.</span></p>` : ""}
     ${warn.length ? `<p class="msg warn"><b>!</b><span>${warn.length} Zahlung(en) mit Hinweisen (z.&nbsp;B. Betrag geändert, nach Fälligkeit).</span></p>` : ""}
     ${skip.length ? `<p class="msg err"><b>✕</b><span>${skip.length} ausgewählte Zahlung(en) werden <b>nicht</b> exportiert (Fehler oder zurückgestellt).</span></p>` : ""}
-    <p class="muted small">Lade die Datei danach im E-Banking hoch. Falls der Upload scheitert, kannst du den Export
-    unter «Exporte» rückgängig machen.</p>`;
-  if (!(await confirmModal(`pain.001 mit ${ok.length} Zahlungen erstellen`, html, "Erstellen & herunterladen"))) return;
+    <p class="muted small">Lade die Datei(en) danach im E-Banking des jeweiligen Kontos hoch. Falls ein Upload scheitert,
+    kannst du den Export unter «Exporte» rückgängig machen.</p>`;
+  let accMap = {};
+  const okd = await formModal(`pain.001 mit ${ok.length} Zahlungen erstellen`, html, "Erstellen & herunterladen", (body) => {
+    accMap = {};
+    for (const sel of $$("select[data-group]", body)) {
+      if (!sel.value) return "Bitte für jede Gruppe ein Belastungskonto wählen.";
+      accMap[sel.dataset.group] = Number(sel.value);
+    }
+    return null;
+  });
+  if (!okd) return;
   try {
-    const r = await api("exports", { method: "POST", body: { items: ok.map((u) => u.key) } });
-    download(r.id);
-    toast(`Export #${r.id} erstellt: ${r.count} Zahlungen`);
+    const r = await api("exports", { method: "POST", body: { items: ok.map((u) => u.key), accounts: accMap } });
+    const files = r.exports || [{ id: r.id, filename: r.filename, count: r.count }];
+    if (files.length === 1) download(files[0].id);
+    toast(`${files.length > 1 ? files.length + " Exporte" : "Export #" + files[0].id} erstellt: ${r.count} Zahlungen`);
     r.warnings.forEach((w) => toast(w, true));
     ok.forEach((u) => S.sel.delete(u.key));
     await loadList();
+    if (files.length > 1) {
+      confirmModal("Dateien herunterladen", `<p>Pro Belastungskonto eine Datei. Jede im E-Banking des jeweiligen Kontos hochladen.</p>
+        <ul class="file-list">${files.map((f) => `<li><a class="btn" href="api/exports/${f.id}/xml" download>⤓ ${esc(f.account?.label || "")}</a>
+          <span class="muted small">${f.count} Zahlung${f.count > 1 ? "en" : ""} · ${esc(f.filename)}</span></li>`).join("")}</ul>`, "");
+    }
   } catch (e) {
     confirmModal("Export nicht möglich", `<ul>${(e.list || [e.message]).map((m) => `<li>${esc(m)}</li>`).join("")}</ul>`, "");
   }
 });
+
+// Modal mit Prüfung: bleibt offen, solange validate() eine Fehlermeldung liefert
+function formModal(title, html, okLabel, validate, onOpen) {
+  return new Promise((res) => {
+    $("#m-title").textContent = title;
+    $("#m-body").innerHTML = html + `<p class="form-error" id="m-err" role="alert"></p>`;
+    const ok = $("#m-ok");
+    ok.textContent = okLabel; ok.className = "btn primary"; ok.hidden = false;
+    $("#modal").hidden = false;
+    onOpen && onOpen($("#m-body"));
+    const done = (v) => { $("#modal").hidden = true; ok.onclick = $("#m-cancel").onclick = null; res(v); };
+    ok.onclick = async () => {
+      ok.disabled = true;
+      try {
+        const err = await validate($("#m-body"));
+        if (err) { $("#m-err").textContent = err; return; }
+        done(true);
+      } finally { ok.disabled = false; }
+    };
+    $("#m-cancel").onclick = () => done(false);
+    ($("select, input", $("#m-body")) || ok).focus();
+  });
+}
 
 function download(id) {
   const a = document.createElement("a");
@@ -467,6 +531,8 @@ async function openDrawer(id, keepTab = false) {
         <dt>Korrespondent</dt><dd>${esc(x.correspondent || "–")}</dd>
         <dt>Dokumentdatum</dt><dd>${dt(x.created)}</dd>
         <dt>Fällig</dt><dd>${dt(x.due_date)}${x.due_estimated && x.due_date ? " (geschätzt aus Zahlungsfrist)" : ""}</dd>
+        <dt>Belastungskonto</dt><dd>${x.account ? `${esc(x.account.label)} <span class="muted small">(${esc(x.account.why)})</span>`
+          : `<span class="muted">keins zugeordnet – beim Export wählen</span>`}</dd>
         <dt>Kontotyp</dt><dd>${e.iban ? (e.qr_iban ? "QR-IBAN" : "IBAN") : "–"} · Referenztyp ${esc(e.ref_type)}</dd>
       </dl>
       <div class="actions">
@@ -636,7 +702,7 @@ async function patch(id, changes) {
 
 // ================================================================ Auswertungen
 async function loadStats() {
-  try { S.stats = await api("stats"); } catch (e) { return toast(e.message, true); }
+  try { S.stats = await api(`stats?account=${encodeURIComponent(S.statsAcc)}`); } catch (e) { return toast(e.message, true); }
   const cs = S.stats.currencies;
   if (!S.ccy || !cs.includes(S.ccy)) S.ccy = cs.includes("CHF") ? "CHF" : cs[0];
   $("#ccy").innerHTML = cs.map((c) => `<button data-c="${c}" aria-pressed="${c === S.ccy}">${c}</button>`).join("");
@@ -769,7 +835,8 @@ async function loadExports() {
       <div class="exp-head">
         <span class="t">Export #${x.id}</span>
         <span class="muted">${dtt(x.created_at)} · ${esc(x.created_by)}</span>
-        <span>${x.items.length} Zahlungen · <b class="num">${tot}</b></span>
+        <span>${x.items.length} Zahlung${x.items.length === 1 ? "" : "en"} · <b class="num">${tot}</b></span>
+        ${x.account ? `<span class="acc-tag" title="${esc(fmtIban(x.account.iban))}">${esc(x.account.label)}</span>` : ""}
         ${x.reverted_at ? `<span class="badge">Rückgängig ${dt(x.reverted_at)} · ${esc(x.reverted_by)}</span>` : ""}
         ${x.hidden ? `<span class="badge" title="Diese Positionen gehören zu Dokumenten, die du in paperless nicht sehen darfst">+ ${x.hidden} Position${x.hidden > 1 ? "en" : ""} ohne Berechtigung</span>` : ""}
         <span class="spacer"></span>
@@ -796,6 +863,124 @@ async function loadExports() {
       loadExports();
     } catch (e) { toast(e.message, true); }
   }));
+}
+
+// ================================================================ Konten
+async function loadAccounts() {
+  try { S.accounts = await api("accounts"); } catch (e) { return toast(e.message, true); }
+  const opts = (cur) => `<option value="all">Alle Konten</option>`
+    + S.accounts.filter((a) => a.active).map((a) => `<option value="${a.id}" ${String(a.id) === cur ? "selected" : ""}>${esc(a.label)}</option>`).join("")
+    + `<option value="none" ${cur === "none" ? "selected" : ""}>Ohne Konto</option>`;
+  $("#acc-filter").innerHTML = opts(S.accFilter);
+  $("#stats-acc").innerHTML = opts(S.statsAcc);
+  $("#acc-filter").hidden = $("#stats-acc").hidden = S.accounts.filter((a) => a.active).length < 2;
+  if ($("#acc-filter").hidden) { S.accFilter = S.statsAcc = "all"; }
+}
+$("#acc-filter").addEventListener("change", (e) => { S.accFilter = e.target.value; renderList(); });
+$("#stats-acc").addEventListener("change", (e) => { S.statsAcc = e.target.value; loadStats(); });
+
+const RULE_KINDS = [["tags", "Tags"], ["correspondents", "Korrespondenten"], ["storage_paths", "Speicherpfade"]];
+
+function renderAccounts() {
+  const su = S.me.superuser;
+  $("#btn-acc-new").hidden = !su;
+  const rules = (a) => RULE_KINDS.flatMap(([k, lbl]) => (a.rules[k] || []).map((v) => `<span class="chip" title="${lbl}">${esc(v)}</span>`)).join("");
+  $("#accounts").innerHTML = S.accounts.length ? S.accounts.map((a) => `
+    <article class="acc-card ${a.active ? "" : "inactive"}">
+      <div class="acc-head">
+        <div><div class="acc-label">${esc(a.label)}</div><div class="mono small">${esc(fmtIban(a.iban))}${a.bic ? ` · ${esc(a.bic)}` : ""}</div></div>
+        <div class="badges">${a.is_default ? `<span class="badge ok">Standard</span>` : ""}
+          ${a.currency ? `<span class="badge">nur ${a.currency}</span>` : `<span class="badge">alle Währungen</span>`}
+          ${a.active ? "" : `<span class="badge">inaktiv</span>`}</div>
+      </div>
+      <div class="small">${esc(a.name)}${a.town ? `, ${esc([a.street, a.building].filter(Boolean).join(" "))}${a.street ? ", " : ""}${esc([a.postal_code, a.town].filter(Boolean).join(" "))}` : ""}</div>
+      <div class="acc-rules"><span class="muted small">Regeln:</span> ${rules(a) || `<span class="muted small">keine${a.is_default ? " – greift als Standard" : " – nur beim Export wählbar"}</span>`}</div>
+      <div class="muted small">Reihenfolge ${a.sort}${a.updated_by ? ` · geändert ${dt(a.updated_at)} von ${esc(a.updated_by)}` : ""}</div>
+      ${su ? `<div class="acc-actions"><button class="btn" data-acc-edit="${a.id}">Bearbeiten</button>
+        <button class="btn danger" data-acc-del="${a.id}">${a.used ? "Deaktivieren" : "Löschen"}</button></div>` : ""}
+    </article>`).join("") : `<div class="empty">Noch keine Konten.</div>`;
+  $$("[data-acc-edit]").forEach((b) => b.addEventListener("click", () => editAccount(S.accounts.find((a) => a.id === Number(b.dataset.accEdit)))));
+  $$("[data-acc-del]").forEach((b) => b.addEventListener("click", async () => {
+    const a = S.accounts.find((x) => x.id === Number(b.dataset.accDel));
+    const txt = a.used ? "<p>Das Konto wurde bereits für Exporte verwendet und wird deshalb nur deaktiviert. Die Exporthistorie bleibt erhalten.</p>"
+      : "<p>Das Konto wird endgültig gelöscht.</p>";
+    if (!(await confirmModal(`«${a.label}» ${a.used ? "deaktivieren" : "löschen"}?`, txt, a.used ? "Deaktivieren" : "Löschen", true))) return;
+    try { await api(`accounts/${a.id}`, { method: "DELETE" }); toast("Gespeichert"); await afterAccountChange(); }
+    catch (e) { toast(e.message, true); }
+  }));
+}
+$("#btn-acc-new").addEventListener("click", () => editAccount(null));
+
+async function afterAccountChange() {
+  await loadAccounts();
+  renderAccounts();
+  S.list = [];  // Zuordnung neu berechnen
+}
+
+async function editAccount(a) {
+  const v = a || { label: "", name: "", iban: "", bic: "", street: "", building: "", postal_code: "", town: "", country: "CH",
+    currency: "", rules: {}, is_default: false, sort: 100, active: true };
+  const rules = {};
+  RULE_KINDS.forEach(([k]) => (rules[k] = [...(v.rules[k] || [])]));
+  const f = (name, label, cls = "", extra = "") => `<label class="f ${cls}">${label}<input name="${name}" value="${esc(v[name] ?? "")}" ${extra}></label>`;
+  const html = `<form id="acc-form" class="fgrid acc-form" autocomplete="off">
+      ${f("label", "Bezeichnung (z. B. «Firma B – CHF»)", "")}
+      ${f("name", "Kontoinhaber (erscheint in der Zahlungsdatei)", "")}
+      ${f("iban", "IBAN", "s4", 'class="mono" spellcheck="false"')}
+      ${f("bic", "BIC (optional)", "s2", 'class="mono" spellcheck="false"')}
+      ${f("street", "Strasse", "s4")}${f("building", "Nr.", "s2")}
+      ${f("postal_code", "PLZ", "s2")}${f("town", "Ort", "s3")}${f("country", "Land", "s1", 'maxlength="2"')}
+      <label class="f s3">Währung<select name="currency">
+        ${[["", "alle Währungen"], ["CHF", "nur CHF"], ["EUR", "nur EUR"]].map(([c, t]) => `<option value="${c}" ${v.currency === c ? "selected" : ""}>${t}</option>`).join("")}
+      </select></label>
+      ${f("sort", "Reihenfolge (kleiner = zuerst)", "s3", 'type="number" min="0"')}
+      <fieldset class="f rules-fs"><legend>Regeln – das Konto gilt für Rechnungen mit …</legend>
+        ${RULE_KINDS.map(([k, lbl]) => `<div class="rule-row" data-kind="${k}">
+          <span class="rule-lbl">${lbl}</span>
+          <span class="chips"></span>
+          <input list="dl-${k}" placeholder="hinzufügen …" data-add="${k}"><datalist id="dl-${k}"></datalist>
+        </div>`).join("")}
+        <span class="hint muted small">Eine Übereinstimmung genügt. Gross-/Kleinschreibung spielt keine Rolle.</span>
+      </fieldset>
+      <label class="check f"><input type="checkbox" name="is_default" ${v.is_default ? "checked" : ""}> Standardkonto, wenn keine Regel passt</label>
+      ${a ? `<label class="check f"><input type="checkbox" name="active" ${v.active ? "checked" : ""}> aktiv</label>` : ""}
+    </form>`;
+  const renderChips = (body) => RULE_KINDS.forEach(([k]) => {
+    $(`.rule-row[data-kind="${k}"] .chips`, body).innerHTML = rules[k].map((x, i) =>
+      `<span class="chip">${esc(x)}<button type="button" data-rm="${k}:${i}" aria-label="${esc(x)} entfernen">×</button></span>`).join("");
+    $$(`[data-rm^="${k}:"]`, body).forEach((b) => b.addEventListener("click", () => { rules[k].splice(Number(b.dataset.rm.split(":")[1]), 1); renderChips(body); }));
+  });
+  const addFrom = (inp) => {
+    const val = inp.value.trim();
+    if (val && !rules[inp.dataset.add].some((x) => x.toLowerCase() === val.toLowerCase())) rules[inp.dataset.add].push(val);
+    inp.value = "";
+  };
+  const ok = await formModal(a ? `Konto «${a.label}» bearbeiten` : "Konto hinzufügen", html, "Speichern", async (body) => {
+    $$("[data-add]", body).forEach(addFrom);   // noch nicht übernommene Eingaben mitnehmen
+    const fd = new FormData($("#acc-form", body));
+    const data = Object.fromEntries(["label", "name", "iban", "bic", "street", "building", "postal_code", "town", "country", "currency", "sort"]
+      .map((k) => [k, (fd.get(k) || "").toString().trim()]));
+    data.rules = rules;
+    data.is_default = fd.get("is_default") === "on";
+    if (a) data.active = fd.get("active") === "on";
+    try {
+      await api(a ? `accounts/${a.id}` : "accounts", { method: a ? "PATCH" : "POST", body: data });
+      return null;
+    } catch (e) { renderChips(body); return e.message; }
+  }, (body) => {
+    $("#acc-form", body).addEventListener("submit", (ev) => ev.preventDefault());
+    renderChips(body);
+    $$("[data-add]", body).forEach((inp) => {
+      inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === ",") { ev.preventDefault(); addFrom(inp); renderChips(body); } });
+      inp.addEventListener("change", () => { addFrom(inp); renderChips(body); });
+    });
+    RULE_KINDS.forEach(async ([k]) => {   // Vorschläge aus paperless
+      try { $(`#dl-${k}`, body).innerHTML = (await api(`paperless/${k}`)).map((n) => `<option value="${esc(n)}">`).join(""); } catch { /* ohne Vorschläge */ }
+    });
+  });
+  if (!ok) return;
+  toast("Konto gespeichert");
+  await afterAccountChange();
 }
 
 // ================================================================ Statuszeile

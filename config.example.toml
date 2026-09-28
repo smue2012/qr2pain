@@ -20,7 +20,9 @@ error    = "QR Fehler"        # optional (nur CLI): markiert Dokumente, die nich
 remove_pending = true         # "zu zahlen"-Tag nach Export entfernen
 installments = "Ratenzahlung" # wird gesetzt, sobald eine Rechnung in Raten aufgeteilt ist ("" = aus)
 
-[debtor]                      # Belastungskonto
+# Belastungskonto: Im Webfrontend nur beim ersten Start als Konto «Standard» übernommen,
+# danach im Tab «Konten» verwalten. Die Kommandozeile verwendet weiterhin diesen Abschnitt.
+[debtor]
 name        = "Muster AG"
 iban        = "CH93 0076 2011 6238 5295 7"
 # bic       = "BCLUCH22XXX"  # optional – ohne BIC wird die IID aus der IBAN verwendet

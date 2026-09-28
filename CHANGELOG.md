@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.0 – 2026-09-28
+- Statuszeile unten links mit der Programmversion (Link zu den Versionshinweisen), auch auf der Anmeldeseite
+- GitHub Actions auf aktuelle Versionen (Node.js 24) umgestellt, Runner fest auf Ubuntu 24.04
+
 ## 1.2.1 – 2026-09-28
 - GitHub-Repository mit Actions für Tests und Docker-Image (ghcr.io, amd64 und arm64)
 - `docker-compose.yml` mit Image aus der Registry

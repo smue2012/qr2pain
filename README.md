@@ -167,7 +167,7 @@ mit 10 Beispielrechnungen und zwei Benutzern: `stephan`/`geheim` sieht alles, `b
 Dazu `[paperless] url = "http://127.0.0.1:8765"` setzen und
 `QR2PAIN_CONFIG=config.toml uvicorn qr2pain.web.app:app --port 8010` starten.
 
-**Release:** Version in `qr2pain/__init__.py` und `qr2pain/pain001.py` erhöhen, `CHANGELOG.md` ergänzen,
+**Release:** Version in `qr2pain/__init__.py` erhöhen, `CHANGELOG.md` ergänzen,
 dann `git tag v1.2.1 && git push --tags`. GitHub baut das Image und veröffentlicht es als `latest`.
 
 ## Lizenz

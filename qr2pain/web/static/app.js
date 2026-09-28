@@ -798,5 +798,17 @@ async function loadExports() {
   }));
 }
 
+// ================================================================ Statuszeile
+async function showVersion() {
+  try {
+    const r = await fetch("api/health", { credentials: "same-origin" });
+    const h = await r.json();
+    const el = $("#version");
+    el.textContent = `qr2pain ${h.version}`;
+    el.title = `Version ${h.version} – Versionshinweise auf GitHub`;
+  } catch { /* Statuszeile ist optional */ }
+}
+
 // ================================================================ Start
+showVersion();
 start();

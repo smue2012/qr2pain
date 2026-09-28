@@ -275,3 +275,9 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform
 .plan-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .plan-actions .spacer { flex: 1; }
 .split-hint { align-self: end; margin: 0 0 8px; }
+
+/* ---------- Statuszeile */
+.statusbar { position: fixed; left: 12px; bottom: 6px; z-index: 4; font-size: 11px; line-height: 1; }
+.statusbar a { color: var(--text-3); text-decoration: none; font-variant-numeric: tabular-nums; }
+.statusbar a:hover { color: var(--text-2); text-decoration: underline; }
+@media (max-width: 900px) { .statusbar { left: 16px; bottom: 4px; } }

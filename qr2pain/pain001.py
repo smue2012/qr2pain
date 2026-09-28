@@ -9,12 +9,12 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 
+from . import __version__ as SOFTWARE_VERSION
 from .swissqr import Address, QRBill, iban_valid, is_qr_iban
 
 NS = "urn:iso:std:iso:20022:tech:xsd:pain.001.001.09"
 SOFTWARE_NAME = "qr2pain"
 SOFTWARE_PROVIDER = "qr2pain contributors"
-SOFTWARE_VERSION = "1.2.1"
 SPS_IG_VERSION = "0203"
 
 # Zulässiger SPS-Zeichensatz (Basic Latin, Latin-1 Supplement, Latin Extended A, ȘșȚț, €)

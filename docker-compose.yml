@@ -8,6 +8,8 @@ services:
   qr2pain:
     image: ghcr.io/smue2012/qr2pain:latest
     restart: unless-stopped
+    environment:
+      - TZ=Europe/Zurich              # Zeitzone für «heute», Dateinamen und Protokoll
     volumes:
       - /pfad/zu/qr2pain/config.toml:/config/config.toml:ro
       - qr2pain-data:/data            # Datenbank: Korrekturen, Exporte, Protokoll -> ins Backup

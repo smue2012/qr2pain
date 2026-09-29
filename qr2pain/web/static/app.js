@@ -6,8 +6,26 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const nf = new Intl.NumberFormat("de-CH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const money = (v) => (v == null || v === "" ? "–" : nf.format(Number(v)));
-const dt = (s) => (s ? s.slice(0, 10).split("-").reverse().join(".") : "–");
-const dtt = (s) => (s ? `${dt(s)} ${s.slice(11, 16)}` : "");
+// Zeitstempel kommen mit Zeitzone vom Server (im Container meist UTC) und werden in der Zeitzone des Browsers
+// angezeigt; reine Datumswerte («2026-09-29») bleiben unverändert.
+const hasTime = (s) => typeof s === "string" && /\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(s);
+const localDate = (s) => {
+  if (!hasTime(s)) return null;
+  const iso = s.replace(" ", "T");
+  const d = new Date(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : iso + "Z");   // ohne Angabe: UTC
+  return isNaN(d) ? null : d;
+};
+const p2 = (n) => String(n).padStart(2, "0");
+const dt = (s) => {
+  if (!s) return "–";
+  const d = localDate(s);
+  return d ? `${p2(d.getDate())}.${p2(d.getMonth() + 1)}.${d.getFullYear()}` : s.slice(0, 10).split("-").reverse().join(".");
+};
+const dtt = (s) => {
+  if (!s) return "";
+  const d = localDate(s);
+  return d ? `${dt(s)} ${p2(d.getHours())}:${p2(d.getMinutes())}` : dt(s);
+};
 const today = () => new Date().toISOString().slice(0, 10);
 const compact = (v) => {
   const a = Math.abs(v);

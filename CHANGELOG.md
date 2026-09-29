@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.3 – 2026-09-29
+
+- Zeitpunkte (letzter Sync, Exporte, Protokoll, Kontostand) werden in der Zeitzone des Browsers angezeigt
+- Docker-Image läuft standardmässig in `Europe/Zurich` (mit `TZ` übersteuerbar): «heute» für Ausführungsdatum und
+  Fälligkeit sowie Dateinamen stimmen nun auch zwischen Mitternacht und 2 Uhr
+
 ## 1.3.2 – 2026-09-29
 
 - von qr2pain angelegte Tags («Ratenzahlung», «QR exportiert») haben keinen Eigentümer mehr und sind für alle

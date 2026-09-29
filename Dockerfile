@@ -4,7 +4,8 @@ LABEL org.opencontainers.image.title="qr2pain" \
       org.opencontainers.image.description="Swiss QR-Rechnungen aus paperless-ngx als pain.001 exportieren" \
       org.opencontainers.image.source="https://github.com/smue2012/qr2pain"
 
-RUN useradd --system --home /app qr2pain \
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata && rm -rf /var/lib/apt/lists/* \
+ && useradd --system --home /app qr2pain \
  && mkdir -p /data && chown qr2pain /data
 WORKDIR /app
 COPY requirements.txt .
@@ -12,8 +13,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY qr2pain ./qr2pain
 
 USER qr2pain
+# Zeitzone für «heute» (Ausführungsdatum, Fälligkeit), Dateinamen und Protokoll – im Stack mit TZ übersteuerbar
 ENV QR2PAIN_CONFIG=/config/config.toml \
-    QR2PAIN_DATA=/data
+    QR2PAIN_DATA=/data \
+    TZ=Europe/Zurich
 VOLUME ["/data"]
 EXPOSE 8010
 HEALTHCHECK --interval=60s --timeout=5s --start-period=20s \

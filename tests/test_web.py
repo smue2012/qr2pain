@@ -225,3 +225,63 @@ def test_accounts_assignment_and_export(web):
     assert st.delete(f"/api/accounts/{tmp['id']}").json()["result"] == "deleted"
     L = {x["doc_id"]: x for x in st.get("/api/invoices").json()}
     assert L[109]["account"]["id"] == a["id"]                           # Firma B inaktiv -> Standard
+
+
+# ---------------------------------------------------------------- Liquiditätsvorschau
+
+def test_timeline_units():
+    from qr2pain.web.service import timeline
+    today = date(2026, 9, 29)                                   # Dienstag, KW 40
+    unit, p, end = timeline("30d", today, None)
+    assert unit == "day" and len(p) == 30 and p[0][2] == "Di 29.09."
+    unit, p, end = timeline("8w", today, None)
+    assert unit == "week" and len(p) == 8 and p[0][0] == date(2026, 9, 28) and p[0][2] == "KW 40"
+    unit, p, end = timeline("12m", today, None)
+    assert unit == "month" and len(p) == 12 and p[0][2] == "Sep 26" and end == date(2027, 9, 1)
+    # automatisch: bis zur letzten geplanten Zahlung
+    assert timeline("auto", today, None)[0] == "day" and len(timeline("auto", today, None)[1]) == 14
+    assert timeline("auto", today, today + timedelta(days=25))[0] == "day"
+    unit, p, _ = timeline("auto", today, today + timedelta(days=60))
+    assert unit == "week" and len(p) == 9
+    unit, p, _ = timeline("auto", today, date(2027, 3, 15))
+    assert unit == "month" and len(p) == 7
+    assert len(timeline("auto", today, date(2031, 1, 1))[1]) == 24        # gedeckelt
+    assert timeline("unsinn", today, None)[0] == "day"                    # unbekannt -> automatisch
+
+
+def test_liquidity_horizon_scheduled_and_balance(web):
+    st = web["client"]("stephan", "geheim")
+    bh = web["client"]("buchhaltung", "geheim2")
+    for h, unit, n in [("30d", "day", 30), ("8w", "week", 8), ("3m", "week", 13), ("6m", "month", 6)]:
+        s = st.get(f"/api/stats?horizon={h}").json()
+        assert s["timeline"]["unit"] == unit
+        assert len([b for b in s["liquidity"] if b["key"] not in ("overdue", "later")]) == n, h
+        assert s["liquidity"][0]["key"] == "overdue"
+
+    def total(s, kind):
+        return sum(Decimal_(b[kind].get("CHF", "0")) for b in s["liquidity"])
+
+    before = st.get("/api/stats?horizon=12m").json()
+    ex = st.post("/api/exports", json={"items": ["101"]}).json()
+    after = st.get("/api/stats?horizon=12m").json()
+    moved = total(before, "open") - total(after, "open")
+    assert moved > 0 and total(after, "scheduled") - total(before, "scheduled") == moved   # exportiert = geplant
+    st.post(f"/api/exports/{ex['id']}/revert")
+    assert total(st.get("/api/stats?horizon=12m").json(), "scheduled") == total(before, "scheduled")
+
+    # Kontostand: optional, jeder angemeldete Benutzer darf ihn erfassen
+    acc = next(a for a in st.get("/api/accounts").json() if a["label"] == "Firma A CHF")
+    assert st.get(f"/api/stats?account={acc['id']}").json()["balances"] == {}
+    r = bh.put("/api/balances", json={"account_id": acc["id"], "currency": "CHF", "amount": "12'345.60"})
+    assert r.status_code == 200, r.text
+    b = st.get(f"/api/stats?account={acc['id']}").json()["balances"]["CHF"]
+    assert b["amount"] == "12345.60" and b["by"] == "buchhaltung" and b["as_of"] == date.today().isoformat()
+    assert st.get("/api/stats").json()["balances"]["CHF"]["amount"] == "12345.60"          # Summe aller Konten
+    for bad, code in [({"amount": "abc"}, 400), ({"amount": "NaN"}, 400), ({"currency": "EUR"}, 400),
+                      ({"account_id": 9999}, 404)]:
+        r = st.put("/api/balances", json={"account_id": acc["id"], "currency": "CHF", "amount": "1", **bad})
+        assert r.status_code == code, (bad, r.text)
+    assert st.put("/api/balances", json={"account_id": acc["id"], "currency": "CHF", "amount": ""}).status_code == 200
+    assert st.get(f"/api/stats?account={acc['id']}").json()["balances"] == {}
+    assert st.put("/api/balances", json={"account_id": acc["id"], "currency": "CHF"},
+                  headers={"X-Requested-With": ""}).status_code == 403                    # CSRF

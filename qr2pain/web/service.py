@@ -675,6 +675,48 @@ class Engine:
                 # Kompatibilität mit 1.3: erster Export
                 "id": created[0]["id"], "filename": created[0]["filename"]}
 
+    # ---------------------------------------------------------------- Kontostände
+    def balances(self, account: str | None) -> dict:
+        """Erfasste Kontostände pro Währung für die Auswahl (ein Konto oder alle aktiven zusammen)."""
+        accs = self.store.accounts(active_only=True)
+        if account not in (None, "", "all", "none"):
+            accs = [a for a in accs if str(a["id"]) == str(account)]
+        elif account == "none":
+            return {}
+        rows = {(r["account_id"], r["currency"]): r for r in self.store.q("SELECT * FROM balances")}
+        out: dict[str, dict] = {}
+        for ccy in ("CHF", "EUR"):
+            cands = [a for a in accs if not a["currency"] or a["currency"] == ccy]
+            got = [rows[(a["id"], ccy)] for a in cands if (a["id"], ccy) in rows]
+            if not got:
+                continue
+            out[ccy] = {"amount": str(sum((Decimal(r["amount"]) for r in got), Decimal(0))),
+                        "as_of": min(r["as_of"] for r in got), "by": got[-1]["updated_by"],
+                        "entered": len(got), "accounts": len(cands)}
+        return out
+
+    def set_balance(self, user: str, account_id: int, currency: str, amount: Any) -> None:
+        acc = self.store.one("SELECT * FROM accounts WHERE id=? AND active=1", account_id)
+        if not acc:
+            raise KeyError(account_id)
+        if currency not in ("CHF", "EUR") or (acc["currency"] and acc["currency"] != currency):
+            raise ValueError("Währung passt nicht zum Konto")
+        if amount in (None, ""):
+            self.store.x("DELETE FROM balances WHERE account_id=? AND currency=?", account_id, currency)
+            self.store.audit(user, None, "Kontostand gelöscht", f"{acc['label']} {currency}")
+            return
+        txt = str(amount).strip().replace("'", "").replace("’", "").replace(" ", "").replace(",", ".")
+        try:
+            val = Decimal(txt).quantize(Decimal("0.01"))
+        except InvalidOperation:
+            raise ValueError("Kontostand ungültig") from None
+        if not val.is_finite() or abs(val) >= Decimal("1e12"):
+            raise ValueError("Kontostand ungültig")
+        self.store.x("INSERT INTO balances (account_id, currency, amount, as_of, updated_by) VALUES (?,?,?,?,?) "
+                     "ON CONFLICT(account_id, currency) DO UPDATE SET amount=excluded.amount, as_of=excluded.as_of, "
+                     "updated_by=excluded.updated_by", account_id, currency, str(val), date.today().isoformat(), user)
+        self.store.audit(user, None, "Kontostand erfasst", f"{acc['label']}: {currency} {val}")
+
     # ---------------------------------------------------------------- Konten
     ACCOUNT_FIELDS = ("label", "name", "iban", "bic", "street", "building", "postal_code", "town", "country",
                       "currency", "rules", "is_default", "sort", "active")
@@ -832,7 +874,7 @@ class Engine:
         return warnings
 
     # ---------------------------------------------------------------- Auswertungen
-    def stats(self, visible: set[int] | None = None, account: str | None = None) -> dict:
+    def stats(self, visible: set[int] | None = None, account: str | None = None, horizon: str = "auto") -> dict:
         """account: None = alle, "none" = ohne Zuordnung, sonst Konto-ID."""
         today = date.today()
 
@@ -854,10 +896,7 @@ class Engine:
                "held": zero(), "held_count": 0, "errors": sum(1 for e in items if e["errors"]),
                "exportable": sum(1 for e in items if e["exportable"])}
         creditors: dict[str, dict] = defaultdict(lambda: {"sum": zero(), "count": 0, "oldest_due": None})
-        weeks = [(today - timedelta(days=today.weekday())) + timedelta(weeks=i) for i in range(8)]
-        buckets = [{"key": "overdue", "label": "Überfällig", "sum": zero()}] + [
-            {"key": w.isoformat(), "label": f"KW {w.isocalendar()[1]}", "from": w.isoformat(), "sum": zero()}
-            for w in weeks] + [{"key": "later", "label": "Später", "sum": zero()}]
+        flows: list[tuple] = []   # (Datum oder None = überfällig, Währung, Betrag, "open"|"scheduled")
 
         for e in items:
             ccy = e["effective"]["currency"]
@@ -890,13 +929,31 @@ class Engine:
                 if due and (c["oldest_due"] is None or due.isoformat() < c["oldest_due"]):
                     c["oldest_due"] = due.isoformat()
                 # Liquidität nach Ausführungsdatum
-                if not e["split"] and due and due < today:
-                    b = buckets[0]
-                elif ex >= weeks[-1] + timedelta(weeks=1):
-                    b = buckets[-1]
-                else:
-                    b = buckets[1 + max(0, (ex - weeks[0]).days // 7)]
-                b["sum"][ccy] += amt
+                flows.append((None if (not e["split"] and due and due < today) else ex, ccy, amt, "open"))
+
+        # bereits exportierte, noch nicht ausgeführte Zahlungen belasten das Konto ebenfalls
+        for it in hist_items:
+            d = to_date(it["exec_date"])
+            if d and d >= today:
+                flows.append((d, it["currency"], to_amount(it["amount"]) or Decimal(0), "scheduled"))
+
+        unit, periods, end = timeline(horizon, today, max((f[0] for f in flows if f[0]), default=None))
+        buckets = [{"key": "overdue", "label": "Überfällig", "open": zero(), "scheduled": zero()}]
+        buckets += [{"key": p[0].isoformat(), "label": p[2], "from": p[0].isoformat(),
+                     "to": (p[1] - timedelta(days=1)).isoformat(), "open": zero(), "scheduled": zero()} for p in periods]
+        later = {"key": "later", "label": "Später", "open": zero(), "scheduled": zero()}
+        for d, ccy, amt, kind in flows:
+            if d is None:
+                b = buckets[0]
+            elif d >= end:
+                b = later
+            else:
+                b = next(buckets[i + 1] for i, p in enumerate(periods) if p[0] <= d < p[1]) if d >= periods[0][0] \
+                    else buckets[1]
+            b[kind].setdefault(ccy, Decimal(0))
+            b[kind][ccy] += amt
+        if any(later["open"].values()) or any(later["scheduled"].values()):
+            buckets.append(later)
 
         # Historie (letzte 12 Monate, nach Ausführungsdatum)
         start = date(today.year - (1 if today.month < 12 else 0), (today.month % 12) + 1, 1)
@@ -935,13 +992,58 @@ class Engine:
             "creditors": sorted(({"name": k, "sum": ser(v["sum"]), "count": v["count"],
                                   "oldest_due": v["oldest_due"]} for k, v in creditors.items()),
                                 key=lambda x: -sum(Decimal(s) for s in x["sum"].values())),
-            "liquidity": [{**b, "sum": ser(b["sum"])} for b in buckets],
+            "liquidity": [{**b, "open": ser(b["open"]), "scheduled": ser(b["scheduled"]),
+                           "sum": ser({c: b["open"].get(c, Decimal(0)) + b["scheduled"].get(c, Decimal(0))
+                                       for c in set(b["open"]) | set(b["scheduled"])})} for b in buckets],
+            "timeline": {"unit": unit, "horizon": horizon, "end": end.isoformat()},
+            "balances": self.balances(account),
             "history": [{"month": m, "sum": ser(v)} for m, v in hist.items()],
             "top_creditors": sorted(({"name": k, "sum": ser(v["sum"]), "count": v["count"]}
                                      for k, v in top.items()),
                                     key=lambda x: -sum(Decimal(s) for s in x["sum"].values()))[:10],
             "issues": issues,
         }
+
+
+MONTHS = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
+DAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+HORIZONS = {"30d": ("day", 30), "8w": ("week", 8), "3m": ("week", 13), "6m": ("month", 6), "12m": ("month", 12)}
+
+
+def _month_start(d: date, add: int = 0) -> date:
+    m = d.month - 1 + add
+    return date(d.year + m // 12, m % 12 + 1, 1)
+
+
+def timeline(horizon: str, today: date, last: date | None) -> tuple[str, list[tuple[date, date, str]], date]:
+    """Perioden (von, bis exklusiv, Beschriftung) für die Liquiditätsvorschau.
+
+    «auto»: bis zur letzten geplanten Zahlung; Tage bis 31 Tage, Wochen bis 16 Wochen, sonst Monate."""
+    if horizon in HORIZONS:
+        unit, n = HORIZONS[horizon]
+    else:
+        span = ((last or today) - today).days
+        if span <= 31:
+            unit, n = "day", max(14, span + 1)
+        elif span <= 16 * 7:
+            unit, n = "week", span // 7 + 1
+        else:
+            unit, n = "month", min(24, (last.year - today.year) * 12 + last.month - today.month + 1)
+    periods = []
+    if unit == "day":
+        for i in range(n):
+            d = today + timedelta(days=i)
+            periods.append((d, d + timedelta(days=1), f"{DAYS[d.weekday()]} {d:%d.%m.}"))
+    elif unit == "week":
+        start = today - timedelta(days=today.weekday())
+        for i in range(n):
+            d = start + timedelta(weeks=i)
+            periods.append((d, d + timedelta(weeks=1), f"KW {d.isocalendar()[1]}"))
+    else:
+        for i in range(n):
+            d = _month_start(today, i)
+            periods.append((d, _month_start(today, i + 1), f"{MONTHS[d.month - 1]} {d:%y}"))
+    return unit, periods, periods[-1][1]
 
 
 def resolve_account(row: dict, currency: str, accounts: list[dict]) -> dict | None:

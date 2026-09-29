@@ -19,7 +19,8 @@ const fmtIban = (s) => (s || "").replace(/\s+/g, "").replace(/(.{4})/g, "$1 ").t
 const fmtRef = (r, t) => (t === "QRR" && r ? r.replace(/^(\d{2})(\d{5})(\d{5})(\d{5})(\d{5})(\d{5})$/, "$1 $2 $3 $4 $5 $6") : r || "");
 
 const S = { me: null, list: [], filter: "ready", q: "", sort: ["due", 1], sel: new Set(), cur: null, stats: null, ccy: null,
-  accounts: [], accFilter: "all", statsAcc: "all" };
+  accounts: [], accFilter: "all", statsAcc: "all", horizon: "auto" };
+try { S.horizon = localStorage.getItem("qr2pain.horizon") || "auto"; } catch { /* ohne Speicher */ }
 const accLabel = (id) => S.accounts.find((a) => a.id === id)?.label || "–";
 
 // ================================================================ API
@@ -707,7 +708,8 @@ async function patch(id, changes) {
 
 // ================================================================ Auswertungen
 async function loadStats() {
-  try { S.stats = await api(`stats?account=${encodeURIComponent(S.statsAcc)}`); } catch (e) { return toast(e.message, true); }
+  try { S.stats = await api(`stats?account=${encodeURIComponent(S.statsAcc)}&horizon=${encodeURIComponent(S.horizon)}`); }
+  catch (e) { return toast(e.message, true); }
   const cs = S.stats.currencies;
   if (!S.ccy || !cs.includes(S.ccy)) S.ccy = cs.includes("CHF") ? "CHF" : cs[0];
   $("#ccy").innerHTML = cs.map((c) => `<button data-c="${c}" aria-pressed="${c === S.ccy}">${c}</button>`).join("");
@@ -727,14 +729,7 @@ function renderStats() {
   ].map(([l, val, f, alert]) => `<div class="tile ${alert ? "alert" : ""}"><div class="label">${l}</div>
       <div class="value">${esc(val)}</div><div class="foot">${esc(f)}</div></div>`).join("");
 
-  barChart($("#ch-liq"), st.liquidity.map((b) => {
-    const val = v(b.sum);
-    let range = "";
-    if (b.from) { const f = new Date(b.from); const t = new Date(f); t.setDate(t.getDate() + 6);
-      range = ` (${dt(b.from)} – ${dt(t.toISOString())})`; }
-    return { label: b.label, value: val, cls: b.key === "overdue" ? "overdue" : "",
-      tip: `${b.label}${range}: ${c} ${money(val)}` };
-  }), { height: 220, empty: `Keine offenen Zahlungen in ${c}` });
+  renderLiquidity();
 
   hbars($("#ch-cred"), st.creditors.filter((x) => v(x.sum) > 0).sort((a, b) => v(b.sum) - v(a.sum)).slice(0, 8)
     .map((x) => ({ name: x.name, value: v(x.sum), meta: `${x.count} Rechnung${x.count > 1 ? "en" : ""}${x.oldest_due ? `, älteste fällig ${dt(x.oldest_due)}` : ""}` })),
@@ -764,6 +759,134 @@ function renderStats() {
   }));
 }
 
+// ---------------- Liquiditätsvorschau mit optionalem Kontostand
+function balanceTarget() {
+  // Kontostand gehört zu genau einem Konto: gewähltes Konto oder das einzige aktive
+  const act = S.accounts.filter((a) => a.active && (!a.currency || a.currency === S.ccy));
+  if (S.statsAcc !== "all" && S.statsAcc !== "none") return act.find((a) => String(a.id) === S.statsAcc) || null;
+  return act.length === 1 ? act[0] : null;
+}
+
+function renderLiquidity() {
+  const st = S.stats, c = S.ccy;
+  const v = (o) => Number(o?.[c] || 0);
+  const unitTxt = { day: "pro Tag", week: "pro Kalenderwoche", month: "pro Monat" }[st.timeline.unit];
+  $("#liq-sub").textContent = `Abflüsse ${unitTxt} nach Ausführungsdatum`;
+  $("#liq-horizon").value = S.horizon;
+
+  const rows = st.liquidity.map((b) => {
+    const open = v(b.open), sched = v(b.scheduled), over = b.key === "overdue";
+    const range = b.from ? (b.from === b.to ? ` (${dt(b.from)})` : ` (${dt(b.from)} – ${dt(b.to)})`) : "";
+    return { label: b.label, value: open + sched, open, sched, over,
+      segs: over ? [{ value: open + sched, cls: "overdue" }] : [{ value: sched, cls: "s2" }, { value: open, cls: "" }],
+      tip: `${b.label}${range}\n${over ? "überfällig" : "offen"}: ${c} ${money(open)}`
+        + (sched ? `\nexportiert, geplant: ${c} ${money(sched)}` : "") };
+  });
+  barChart($("#ch-liq"), rows, { height: 230, empty: `Keine geplanten Zahlungen in ${c}` });
+  $("#liq-legend").hidden = !rows.some((r) => r.value > 0);
+
+  // Kontostand
+  const target = balanceTarget();
+  const bal = st.balances?.[c];
+  const inp = $("#bal-input");
+  $("#bal-ccy").textContent = c;
+  inp.value = bal ? nf.format(Number(bal.amount)) : "";
+  inp.disabled = !target;
+  inp.title = target ? `Kontostand von «${target.label}» in ${c}. Leer lassen, wenn nicht bekannt.`
+    : "Für die Eingabe oben ein Konto wählen. Bei «Alle Konten» wird die Summe der erfassten Stände verwendet.";
+  inp.dataset.account = target ? target.id : "";
+  const box = $("#bal-box");
+  if (!bal) { box.hidden = true; return; }
+  box.hidden = false;
+  let run = Number(bal.amount);
+  const pts = [{ label: "Heute", value: run, tip: `Kontostand heute: ${c} ${money(run)}` }];
+  rows.forEach((r) => {
+    run -= r.value;
+    if (r.value || r.over) pts.push({ label: r.label, value: run,
+      tip: `${r.over ? "nach überfälligen Zahlungen" : "Ende " + r.label}: ${c} ${money(run)}\n(Abflüsse ${c} ${money(r.value)})` });
+    else pts.push({ label: r.label, value: run, tip: `${r.label}: ${c} ${money(run)} (keine Zahlungen)` });
+  });
+  const minPt = pts.reduce((m, p) => (p.value < m.value ? p : m), pts[0]);
+  const firstNeg = pts.find((p) => p.value < 0);
+  const partial = bal.accounts > 1 ? ` · Summe aus ${bal.entered} von ${bal.accounts} Konten` : "";
+  $("#bal-sub").textContent = `Stand ${dt(bal.as_of)}, erfasst von ${bal.by}${partial}`;
+  lineChart($("#ch-bal"), pts, { height: 190 });
+  $("#tiles").insertAdjacentHTML("beforeend", `<div class="tile ${firstNeg ? "alert" : ""}">
+    <div class="label">Tiefster Kontostand</div><div class="value">${c} ${money(minPt.value)}</div>
+    <div class="foot">${firstNeg ? `⚠ reicht nicht – negativ ab ${esc(firstNeg.label)}` : `bei ${esc(minPt.label)}, Deckung reicht`}</div></div>`);
+}
+
+$("#liq-horizon").addEventListener("change", (e) => {
+  S.horizon = e.target.value;
+  try { localStorage.setItem("qr2pain.horizon", S.horizon); } catch { /* ohne Speicher */ }
+  loadStats();
+});
+async function saveBalance() {
+  const inp = $("#bal-input");
+  if (!inp.dataset.account) return;
+  const raw = inp.value.trim();
+  const cur = S.stats.balances?.[S.ccy];
+  if ((raw === "" && !cur) || (cur && raw !== "" && Math.abs(Number(raw.replace(/['’\s]/g, "").replace(",", ".")) - Number(cur.amount)) < 0.005)) return;
+  try {
+    await api("balances", { method: "PUT", body: { account_id: Number(inp.dataset.account), currency: S.ccy, amount: raw || null } });
+    toast(raw ? "Kontostand gespeichert" : "Kontostand entfernt");
+    loadStats();
+  } catch (e) { toast(e.message, true); }
+}
+$("#bal-input").addEventListener("change", saveBalance);
+$("#bal-input").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+
+function lineChart(el, pts, { height = 190 } = {}) {
+  el._chart = [pts, { height }, "line"];
+  const W = Math.max(300, el.clientWidth || 720), H = height, pl = 56, pr = 12, pt = 16, pb = 26;
+  const hi = Math.max(0, ...pts.map((p) => p.value)), lo = Math.min(0, ...pts.map((p) => p.value));
+  const step = niceStep((hi - lo || 1) / 4);
+  const top = Math.ceil(hi / step) * step, bot = Math.floor(lo / step) * step || 0;
+  const iw = W - pl - pr, ih = H - pt - pb, n = pts.length, slot = iw / n;
+  const y = (v) => pt + ih - ((v - bot) / ((top - bot) || 1)) * ih;
+  const x = (i) => pl + slot * i + slot / 2;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Kontostand-Verlauf">`;
+  for (let t = bot; t <= top + 1e-9; t += step) {
+    svg += `<line class="${Math.abs(t) < 1e-9 ? "zeroline" : "gridline"}" x1="${pl}" x2="${W - pr}" y1="${y(t)}" y2="${y(t)}"/>`;
+    svg += `<text class="axis" x="${pl - 8}" y="${y(t) + 4}" text-anchor="end">${compact(t)}</text>`;
+  }
+  const every = Math.ceil(n / Math.max(4, Math.floor(iw / 70)));
+  // Linie; Abschnitte unter null in der Warnfarbe
+  svg += `<polyline class="bal-line" points="${pts.map((p, i) => `${x(i)},${y(p.value)}`).join(" ")}"/>`;
+  pts.forEach((p, i) => {
+    svg += `<g class="col" data-i="${i}"><rect class="hit" x="${pl + slot * i}" y="${pt}" width="${slot}" height="${ih}"/>`;
+    svg += `<circle class="bal-dot ${p.value < 0 ? "neg" : ""}" cx="${x(i)}" cy="${y(p.value)}" r="4"/>`;
+    if (i % every === 0 || i === n - 1) svg += `<text class="axis" x="${x(i)}" y="${H - 8}" text-anchor="middle">${esc(p.label)}</text>`;
+    svg += "</g>";
+  });
+  svg += "</svg>";
+  el.innerHTML = svg + `<div class="tip" hidden></div>`;
+  bindTips(el, pts, (g) => g.querySelector("circle"));
+}
+
+function bindTips(el, data, anchor) {
+  const tip = $(".tip", el);
+  $$("g.col", el).forEach((g) => {
+    g.addEventListener("mouseenter", () => {
+      const d = data[g.dataset.i];
+      tip.textContent = d.tip;
+      const r = g.querySelector(".hit").getBoundingClientRect(), er = el.getBoundingClientRect();
+      const a = anchor(g)?.getBoundingClientRect().top ?? (er.top + er.height * 0.8);
+      tip.style.left = `${Math.min(Math.max(r.left - er.left + r.width / 2, 90), er.width - 90)}px`;
+      tip.style.top = `${a - er.top}px`;
+      tip.hidden = false;
+    });
+    g.addEventListener("mouseleave", () => (tip.hidden = true));
+  });
+}
+
+function niceStep(x) {   // runde Schrittweite: 1, 2, 2.5, 5 × 10^n
+  if (x <= 0) return 1;
+  const p = 10 ** Math.floor(Math.log10(x));
+  for (const s of [1, 2, 2.5, 5, 10]) if (s * p >= x) return s * p;
+  return 10 * p;
+}
+
 function niceMax(m) {
   if (m <= 0) return 1;
   const p = 10 ** Math.floor(Math.log10(m));
@@ -775,42 +898,41 @@ function barChart(el, data, { height = 220, labels = true, empty = "Keine Daten"
   el._chart = [data, { height, labels, empty }];
   if (!data.some((d) => d.value > 0)) { el.innerHTML = `<p class="muted chart-empty">${esc(empty)}</p>`; return; }
   const W = Math.max(300, el.clientWidth || 720), H = height, pl = 48, pr = 8, pt = 18, pb = 26;
-  const max = niceMax(Math.max(0, ...data.map((d) => d.value)));
+  const step = niceStep(Math.max(0, ...data.map((d) => d.value)) / 4);
+  const max = Math.ceil(Math.max(0, ...data.map((d) => d.value)) / step) * step || step;
   const iw = W - pl - pr, ih = H - pt - pb, n = data.length;
   const slot = iw / n, bw = Math.min(46, slot * 0.62);
   const y = (v) => pt + ih - (v / max) * ih;
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => t * max);
+  const ticks = Array.from({ length: Math.round(max / step) + 1 }, (_, i) => i * step);
+  const every = Math.ceil(n / Math.max(4, Math.floor(iw / 64)));   // Beschriftungen ohne Überlappung
+  const showVal = labels && n <= 16;
   let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="Balkendiagramm">`;
   ticks.forEach((t) => {
     svg += `<line class="${t === 0 ? "baseline" : "gridline"}" x1="${pl}" x2="${W - pr}" y1="${y(t)}" y2="${y(t)}"/>`;
     svg += `<text class="axis" x="${pl - 8}" y="${y(t) + 4}" text-anchor="end">${compact(t)}</text>`;
   });
   data.forEach((d, i) => {
-    const cx = pl + slot * i + slot / 2, x = cx - bw / 2, top = y(d.value), h = pt + ih - top;
-    const r = Math.min(4, h / 2, bw / 2);
+    const cx = pl + slot * i + slot / 2, x = cx - bw / 2;
     svg += `<g class="col" data-i="${i}"><rect class="hit" x="${pl + slot * i}" y="${pt}" width="${slot}" height="${ih}"/>`;
-    if (d.value > 0) {
-      svg += `<path class="bar ${d.cls || ""}" d="M${x},${pt + ih} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${pt + ih} Z"/>`;
-      if (labels) svg += `<text class="vlabel" x="${cx}" y="${top - 5}" text-anchor="middle">${compact(d.value)}</text>`;
-    }
-    if (n <= 12 || i % 2 === 0) svg += `<text class="axis" x="${cx}" y="${H - 8}" text-anchor="middle">${esc(d.label)}</text>`;
+    const segs = (d.segs || [{ value: d.value, cls: d.cls || "" }]).filter((sg) => sg.value > 0);
+    let base = 0;
+    segs.forEach((sg, j) => {
+      const y0 = y(base), y1 = y(base + sg.value), last = j === segs.length - 1;
+      const gap = j > 0 ? 2 : 0;                     // 2px Abstand zwischen gestapelten Segmenten
+      const top = y1, bottom = y0 - gap, h = bottom - top;
+      if (h > 0.5) {
+        const r = last ? Math.min(4, h / 2, bw / 2) : 0;
+        svg += `<path class="bar ${sg.cls}" d="M${x},${bottom} V${top + r} Q${x},${top} ${x + r},${top} H${x + bw - r} Q${x + bw},${top} ${x + bw},${top + r} V${bottom} Z"/>`;
+      }
+      base += sg.value;
+    });
+    if (showVal && d.value > 0) svg += `<text class="vlabel" x="${cx}" y="${y(d.value) - 5}" text-anchor="middle">${compact(d.value)}</text>`;
+    if (i % every === 0) svg += `<text class="axis" x="${cx}" y="${H - 8}" text-anchor="middle">${esc(d.label)}</text>`;
     svg += "</g>";
   });
   svg += "</svg>";
   el.innerHTML = svg + `<div class="tip" hidden></div>`;
-  const tip = $(".tip", el);
-  $$("g.col", el).forEach((g) => {
-    g.addEventListener("mouseenter", () => {
-      const d = data[g.dataset.i];
-      tip.textContent = d.tip;
-      const r = g.querySelector(".hit").getBoundingClientRect(), er = el.getBoundingClientRect();
-      const barTop = g.querySelector(".bar")?.getBoundingClientRect().top ?? (er.top + er.height * 0.8);
-      tip.style.left = `${r.left - er.left + r.width / 2}px`;
-      tip.style.top = `${barTop - er.top}px`;
-      tip.hidden = false;
-    });
-    g.addEventListener("mouseleave", () => (tip.hidden = true));
-  });
+  bindTips(el, data, (g) => g.querySelector(".bar:last-of-type"));
 }
 
 function hbars(el, items, ccy, emptyText) {
@@ -825,7 +947,10 @@ function hbars(el, items, ccy, emptyText) {
 let resizeT;
 window.addEventListener("resize", () => {
   clearTimeout(resizeT);
-  resizeT = setTimeout(() => $$(".chart").forEach((el) => el._chart && barChart(el, ...el._chart)), 150);
+  resizeT = setTimeout(() => $$(".chart").forEach((el) => {
+    if (!el._chart || el.offsetParent === null) return;
+    el._chart[2] === "line" ? lineChart(el, el._chart[0], el._chart[1]) : barChart(el, ...el._chart);
+  }), 150);
 });
 
 // ================================================================ Exporte

@@ -89,8 +89,33 @@
       <div class="tiles" id="tiles"></div>
       <div class="cards">
         <article class="card wide">
-          <h3>Liquiditätsvorschau <span class="muted small">offene Zahlungen nach Ausführungswoche</span></h3>
+          <div class="liq-head">
+            <h3>Liquiditätsvorschau <span class="muted small" id="liq-sub">Abflüsse nach Ausführungsdatum</span></h3>
+            <div class="liq-controls">
+              <label class="inline">Zeitraum
+                <select id="liq-horizon">
+                  <option value="auto">Automatisch</option>
+                  <option value="30d">30 Tage (täglich)</option>
+                  <option value="8w">8 Wochen</option>
+                  <option value="3m">3 Monate (wöchentlich)</option>
+                  <option value="6m">6 Monate (monatlich)</option>
+                  <option value="12m">12 Monate (monatlich)</option>
+                </select>
+              </label>
+              <label class="inline">Kontostand heute <span class="muted small">(optional)</span>
+                <span class="bal-wrap"><span class="ccy" id="bal-ccy">CHF</span>
+                  <input id="bal-input" inputmode="decimal" placeholder="nicht erfasst" autocomplete="off"></span>
+              </label>
+            </div>
+          </div>
+          <div class="legend" id="liq-legend">
+            <span><i class="sw s1"></i>offen</span><span><i class="sw s2"></i>exportiert, geplant</span><span><i class="sw s3"></i>überfällig</span>
+          </div>
           <div class="chart" id="ch-liq"></div>
+          <div id="bal-box" hidden>
+            <h3 class="bal-title">Kontostand-Verlauf <span class="muted small" id="bal-sub"></span></h3>
+            <div class="chart" id="ch-bal"></div>
+          </div>
         </article>
         <article class="card">
           <h3>Offen nach Empfänger</h3>

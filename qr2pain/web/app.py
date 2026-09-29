@@ -57,7 +57,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     # CSRF-Schutz: schreibende API-Aufrufe nur mit eigenem Header (setzt kein fremdes Formular)
-    if request.method in ("POST", "PATCH", "DELETE") and request.url.path.startswith("/api/") \
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.url.path.startswith("/api/") \
             and request.headers.get("X-Requested-With") != "qr2pain":
         return JSONResponse({"detail": "CSRF-Prüfung fehlgeschlagen"}, status_code=403)
     resp = await call_next(request)
@@ -391,8 +391,25 @@ def revert_export(export_id: int, s: Session = Depends(session)):
 # ============================================================ Auswertungen
 
 @app.get("/api/stats")
-def stats(account: str | None = None, s: Session = Depends(session)):
-    return engine.stats(access.visible(s), account)
+def stats(account: str | None = None, horizon: str = "auto", s: Session = Depends(session)):
+    return engine.stats(access.visible(s), account, horizon)
+
+
+class BalanceReq(BaseModel):
+    account_id: int
+    currency: str
+    amount: str | None = None      # leer = Kontostand entfernen
+
+
+@app.put("/api/balances")
+def put_balance(body: BalanceReq, s: Session = Depends(session)):
+    try:
+        engine.set_balance(s.user, body.account_id, body.currency, body.amount)
+    except KeyError:
+        raise HTTPException(404, "Konto nicht gefunden")
+    except ValueError as e:
+        _err(e)
+    return {}
 
 
 # ============================================================ Konten

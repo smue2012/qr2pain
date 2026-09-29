@@ -61,7 +61,7 @@ bleibt erhalten und wird bei Bedarf automatisch migriert.
 
 **Auswertungen** (pro Währung)
 - Kennzahlen: offen, fällig in 7 Tagen, überfällig, zurückgestellt, mit Problemen
-- Liquiditätsvorschau nach Ausführungswoche
+- **Liquiditätsvorschau** nach Ausführungsdatum (siehe unten)
 - offene Beträge nach Empfänger
 - bezahlte Beträge pro Monat und Top-Empfänger der letzten 12 Monate
 - Liste der Fehler und Duplikate
@@ -70,6 +70,21 @@ bleibt erhalten und wird bei Bedarf automatisch migriert.
 - Verlauf aller Zahlungsdateien mit Positionen
 - XML erneut herunterladen
 - **Export rückgängig machen**: Die Rechnungen werden wieder offen und in paperless zurückgetaggt. Nur verwenden, wenn die Datei nicht bei der Bank ausgeführt wurde.
+
+### Liquiditätsvorschau
+
+Die Vorschau zeigt die Abflüsse pro Periode, gestapelt nach **offen** und **exportiert, geplant**. Geplant sind
+Zahlungen, deren pain.001 schon erstellt ist, deren Ausführungsdatum aber noch nicht erreicht ist. Überfällige
+Rechnungen stehen in einem eigenen roten Balken vorne, alles nach dem Zeitraum in «Später».
+
+- **Zeitraum:** «Automatisch» reicht bis zur letzten geplanten Zahlung und wählt die Einteilung selbst:
+  bis 31 Tage täglich, bis 16 Wochen wöchentlich, sonst monatlich (höchstens 24 Monate).
+  Fest wählbar sind 30 Tage, 8 Wochen, 3 Monate, 6 und 12 Monate. Die Wahl bleibt im Browser gespeichert.
+- **Kontostand heute** (optional): Ist für das gewählte Konto und die Währung ein Stand erfasst, erscheint darunter
+  der Kontostand-Verlauf nach allen Zahlungen, dazu die Kennzahl «Tiefster Kontostand» mit Warnung, ab wann das Konto
+  ins Minus fällt. Eingaben wie `12'345.60` sind erlaubt, ein leeres Feld löscht den Stand.
+  Bei «Alle Konten» wird die Summe der erfassten Stände verwendet. Eingabe ist möglich, sobald ein Konto
+  ausgewählt ist oder nur ein Konto zur Währung passt. Eingaben werden mit Datum und Benutzer protokolliert.
 
 ### Zahlungskonten
 

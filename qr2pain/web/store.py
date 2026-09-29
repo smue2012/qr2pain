@@ -73,6 +73,14 @@ CREATE TABLE IF NOT EXISTS accounts (
     updated_at  TEXT,
     updated_by  TEXT
 );
+CREATE TABLE IF NOT EXISTS balances (
+    account_id  INTEGER NOT NULL,
+    currency    TEXT NOT NULL,
+    amount      TEXT NOT NULL,
+    as_of       TEXT NOT NULL,              -- Datum der Erfassung
+    updated_by  TEXT,
+    PRIMARY KEY (account_id, currency)
+);
 CREATE INDEX IF NOT EXISTS ix_items_doc ON export_items(doc_id);
 CREATE INDEX IF NOT EXISTS ix_audit_doc ON audit(doc_id);
 """

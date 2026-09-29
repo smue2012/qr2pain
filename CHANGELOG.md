@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.0 – 2026-09-29
+
+**Liquiditätsvorschau**
+- Zeitraum wählbar: automatisch (Tage, Wochen oder Monate bis zur letzten geplanten Zahlung), 30 Tage, 8 Wochen, 3, 6 oder 12 Monate
+- bereits exportierte Zahlungen mit Ausführungsdatum in der Zukunft erscheinen als «exportiert, geplant»
+- überfällige Rechnungen als eigener Balken, Zahlungen nach dem Zeitraum unter «Später»
+- optionales Feld «Kontostand heute» pro Konto und Währung mit Kontostand-Verlauf und Kennzahl «Tiefster Kontostand»
+- runde Achsenbeschriftung, Legende und Tooltips mit Aufteilung
+
+**Korrekturen**
+- CSRF-Prüfung gilt auch für PUT-Anfragen
+- Navigation läuft auf schmalen Bildschirmen nicht mehr über den Rand
+
 ## 1.0.0 – 2026-09-28
 
 Erste Version.

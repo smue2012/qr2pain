@@ -760,11 +760,16 @@ function renderStats() {
 }
 
 // ---------------- Liquiditätsvorschau mit optionalem Kontostand
+function balanceCandidates() {
+  return S.accounts.filter((a) => a.active && (!a.currency || a.currency === S.ccy));
+}
 function balanceTarget() {
-  // Kontostand gehört zu genau einem Konto: gewähltes Konto oder das einzige aktive
-  const act = S.accounts.filter((a) => a.active && (!a.currency || a.currency === S.ccy));
+  // Kontostand gehört zu genau einem Konto: oben gewähltes Konto, sonst Auswahl neben dem Feld
+  const act = balanceCandidates();
   if (S.statsAcc !== "all" && S.statsAcc !== "none") return act.find((a) => String(a.id) === S.statsAcc) || null;
-  return act.length === 1 ? act[0] : null;
+  if (act.length === 1) return act[0];
+  const sel = $("#bal-acc").value;
+  return act.find((a) => String(a.id) === sel) || act.find((a) => a.is_default) || act[0] || null;
 }
 
 function renderLiquidity() {
@@ -788,12 +793,22 @@ function renderLiquidity() {
   // Kontostand
   const target = balanceTarget();
   const bal = st.balances?.[c];
-  const inp = $("#bal-input");
+  const inp = $("#bal-input"), accSel = $("#bal-acc");
   $("#bal-ccy").textContent = c;
-  inp.value = bal ? nf.format(Number(bal.amount)) : "";
+  // bei «Alle Konten» mit mehreren passenden Konten: Konto direkt neben dem Feld wählen
+  const cands = balanceCandidates();
+  const pick = (S.statsAcc === "all" || S.statsAcc === "none") && cands.length > 1;
+  accSel.hidden = !pick;
+  if (pick) {
+    const keep = target ? String(target.id) : "";
+    accSel.innerHTML = cands.map((a) => `<option value="${a.id}">${esc(a.label)}</option>`).join("");
+    accSel.value = keep;
+  }
+  const own = target && bal?.items ? bal.items[String(target.id)] : undefined;
+  if (document.activeElement !== inp) inp.value = own !== undefined ? nf.format(Number(own)) : "";
   inp.disabled = !target;
   inp.title = target ? `Kontostand von «${target.label}» in ${c}. Leer lassen, wenn nicht bekannt.`
-    : "Für die Eingabe oben ein Konto wählen. Bei «Alle Konten» wird die Summe der erfassten Stände verwendet.";
+    : `Kein aktives Konto für ${c} vorhanden.`;
   inp.dataset.account = target ? target.id : "";
   const box = $("#bal-box");
   if (!bal) { box.hidden = true; return; }
@@ -821,20 +836,33 @@ $("#liq-horizon").addEventListener("change", (e) => {
   try { localStorage.setItem("qr2pain.horizon", S.horizon); } catch { /* ohne Speicher */ }
   loadStats();
 });
+let balTimer = null;
 async function saveBalance() {
-  const inp = $("#bal-input");
+  clearTimeout(balTimer);
+  const inp = $("#bal-input"), state = $("#bal-state");
   if (!inp.dataset.account) return;
   const raw = inp.value.trim();
-  const cur = S.stats.balances?.[S.ccy];
-  if ((raw === "" && !cur) || (cur && raw !== "" && Math.abs(Number(raw.replace(/['’\s]/g, "").replace(",", ".")) - Number(cur.amount)) < 0.005)) return;
+  const num = raw === "" ? null : Number(raw.replace(/['’\s]/g, "").replace(",", "."));
+  const cur = S.stats.balances?.[S.ccy]?.items?.[inp.dataset.account];
+  if (raw !== "" && !Number.isFinite(num)) { state.textContent = "keine gültige Zahl"; state.className = "bal-state err small"; return; }
+  if ((num === null && cur === undefined) || (num !== null && cur !== undefined && Math.abs(num - Number(cur)) < 0.005)) return;
+  state.textContent = "speichert…"; state.className = "bal-state muted small";
   try {
     await api("balances", { method: "PUT", body: { account_id: Number(inp.dataset.account), currency: S.ccy, amount: raw || null } });
-    toast(raw ? "Kontostand gespeichert" : "Kontostand entfernt");
-    loadStats();
-  } catch (e) { toast(e.message, true); }
+    state.textContent = raw ? "✓ gespeichert" : "✓ entfernt"; state.className = "bal-state ok small";
+    setTimeout(() => { if (state.textContent.startsWith("✓")) state.textContent = ""; }, 4000);
+    await loadStats();
+  } catch (e) { state.textContent = ""; toast(e.message, true); }
 }
+// speichern nach kurzer Tipp-Pause, bei Enter oder beim Verlassen des Feldes
+$("#bal-input").addEventListener("input", () => {
+  clearTimeout(balTimer);
+  $("#bal-state").textContent = "";
+  balTimer = setTimeout(saveBalance, 1200);
+});
 $("#bal-input").addEventListener("change", saveBalance);
-$("#bal-input").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
+$("#bal-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveBalance(); } });
+$("#bal-acc").addEventListener("change", () => loadStats());
 
 function lineChart(el, pts, { height = 190 } = {}) {
   el._chart = [pts, { height }, "line"];

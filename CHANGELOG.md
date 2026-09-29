@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1 – 2026-09-29
+
+- Kontostand wird nach kurzer Tipp-Pause oder mit Enter gespeichert, mit Rückmeldung «✓ gespeichert» neben dem Feld
+- bei «Alle Konten» mit mehreren Konten erscheint neben dem Feld eine Kontoauswahl, statt dass das Feld gesperrt ist
+- ungültige Eingaben werden direkt beim Feld gemeldet
+
 ## 1.1.0 – 2026-09-29
 
 **Liquiditätsvorschau**

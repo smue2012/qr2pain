@@ -276,6 +276,7 @@ def test_liquidity_horizon_scheduled_and_balance(web):
     assert r.status_code == 200, r.text
     b = st.get(f"/api/stats?account={acc['id']}").json()["balances"]["CHF"]
     assert b["amount"] == "12345.60" and b["by"] == "buchhaltung" and b["as_of"] == date.today().isoformat()
+    assert b["items"] == {str(acc["id"]): "12345.60"}
     assert st.get("/api/stats").json()["balances"]["CHF"]["amount"] == "12345.60"          # Summe aller Konten
     for bad, code in [({"amount": "abc"}, 400), ({"amount": "NaN"}, 400), ({"currency": "EUR"}, 400),
                       ({"account_id": 9999}, 404)]:

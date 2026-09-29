@@ -83,8 +83,9 @@ Rechnungen stehen in einem eigenen roten Balken vorne, alles nach dem Zeitraum i
 - **Kontostand heute** (optional): Ist für das gewählte Konto und die Währung ein Stand erfasst, erscheint darunter
   der Kontostand-Verlauf nach allen Zahlungen, dazu die Kennzahl «Tiefster Kontostand» mit Warnung, ab wann das Konto
   ins Minus fällt. Eingaben wie `12'345.60` sind erlaubt, ein leeres Feld löscht den Stand.
-  Bei «Alle Konten» wird die Summe der erfassten Stände verwendet. Eingabe ist möglich, sobald ein Konto
-  ausgewählt ist oder nur ein Konto zur Währung passt. Eingaben werden mit Datum und Benutzer protokolliert.
+  Gespeichert wird nach kurzer Tipp-Pause oder mit Enter. Bei «Alle Konten» mit mehreren Konten wählt man das Konto
+  direkt neben dem Feld; der Verlauf rechnet dann mit der Summe der erfassten Stände.
+  Eingaben werden mit Datum und Benutzer protokolliert.
 
 ### Zahlungskonten
 

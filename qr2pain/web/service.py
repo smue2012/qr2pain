@@ -692,7 +692,8 @@ class Engine:
                 continue
             out[ccy] = {"amount": str(sum((Decimal(r["amount"]) for r in got), Decimal(0))),
                         "as_of": min(r["as_of"] for r in got), "by": got[-1]["updated_by"],
-                        "entered": len(got), "accounts": len(cands)}
+                        "entered": len(got), "accounts": len(cands),
+                        "items": {str(r["account_id"]): r["amount"] for r in got}}
         return out
 
     def set_balance(self, user: str, account_id: int, currency: str, amount: Any) -> None:

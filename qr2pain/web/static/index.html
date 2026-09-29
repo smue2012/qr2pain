@@ -103,8 +103,10 @@
                 </select>
               </label>
               <label class="inline">Kontostand heute <span class="muted small">(optional)</span>
-                <span class="bal-wrap"><span class="ccy" id="bal-ccy">CHF</span>
-                  <input id="bal-input" inputmode="decimal" placeholder="nicht erfasst" autocomplete="off"></span>
+                <span class="bal-wrap"><select id="bal-acc" aria-label="Konto für den Kontostand" hidden></select>
+                  <span class="ccy" id="bal-ccy">CHF</span>
+                  <input id="bal-input" inputmode="decimal" placeholder="nicht erfasst" autocomplete="off">
+                  <span class="bal-state muted small" id="bal-state" aria-live="polite"></span></span>
               </label>
             </div>
           </div>

@@ -443,6 +443,9 @@ class Engine:
 
             docs = list(pl.documents([pending], [exported]))
             st["total"] = len(docs)
+            # Ist das Betragsfeld zugleich das Rückschreibefeld «Zahlbetrag», steht darin nach dem ersten Export
+            # der bezahlte bzw. offene Betrag – dann den ursprünglich erfassten Betrag nicht mehr überschreiben.
+            frozen = set(self.paid_parts()) if self.amount_field_shared() else set()
             seen = set()
             todo = []
             for doc in docs:
@@ -456,6 +459,8 @@ class Engine:
                             tags=json.dumps(sorted(tag_names.get(t, str(t)) for t in doc.get("tags", []))),
                             storage_path=spaths.get(doc.get("storage_path")),
                             synced_at=now())
+                if doc["id"] in frozen:
+                    meta.pop("pl_amount")
                 row = self.store.invoice(doc["id"])
                 if row and row["status"] == "exported":
                     st["done"] += 1
@@ -847,6 +852,11 @@ class Engine:
         return {"id": export_id, "count": len(items), "warnings": warnings}
 
     # ---------------------------------------------------------------- Zahlbetrag / Zahlungsdatum in paperless
+    def amount_field_shared(self) -> bool:
+        src = (self.cfg.get("amount_field") or "").strip().lower()
+        dst = (self.cfg.get("web", {}).get("paid_amount_field", "zahlbetrag") or "").strip().lower()
+        return bool(src) and src == dst
+
     def payment_values(self, doc_id: int) -> tuple[Decimal | None, str | None, str]:
         """(Betrag, Datum, Währung) für die paperless-Felder.
 
@@ -870,11 +880,7 @@ class Engine:
         names = {"amount": w.get("paid_amount_field", "zahlbetrag"), "date": w.get("paid_date_field", "zahlungsdatum")}
         explicit = {k for k, key in (("amount", "paid_amount_field"), ("date", "paid_date_field")) if w.get(key)}
         fields, warnings = {}, []
-        src = (self.cfg.get("amount_field") or "").strip().lower()
-        if names["amount"] and names["amount"].strip().lower() == src:
-            warnings.append(f"Feld «{names['amount']}» ist auch der Rechnungsbetrag (amount_field) – "
-                            "Zahlbetrag wird nicht zurückgeschrieben, bitte ein eigenes Feld verwenden")
-            names["amount"] = ""
+        shared = self.amount_field_shared()
         for kind, name in names.items():
             if not name:
                 continue
@@ -893,7 +899,13 @@ class Engine:
             vals = {}
             if "amount" in fields:
                 f = fields["amount"]
-                vals[f["id"]] = None if amount is None else field_value(f, amount, ccy)
+                if amount is not None:
+                    vals[f["id"]] = field_value(f, amount, ccy)
+                elif shared:   # nichts mehr bezahlt: ursprünglich erfassten Rechnungsbetrag wiederherstellen
+                    row = self.store.invoice(d)
+                    vals[f["id"]] = row["pl_amount"] if row else None
+                else:
+                    vals[f["id"]] = None
             if "date" in fields:
                 vals[fields["date"]["id"]] = when
             try:

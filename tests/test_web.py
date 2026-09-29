@@ -353,3 +353,32 @@ def test_payment_fields_written_back(web):
     assert f["Zahlbetrag"] == "CHF613.40" and f["Zahlungsdatum"] is None
     st.post(f"/api/exports/{e1['id']}/revert")
     assert fields_of(web, 108)["Zahlbetrag"] is None
+
+
+def test_shared_amount_field(web):
+    """Betragsfeld (Rechnung ohne QR-Betrag) ist zugleich das Rückschreibefeld: Ausgangsbetrag bleibt erhalten."""
+    from qr2pain.web.app import engine
+    old_web = dict(engine.cfg.get("web", {}))
+    engine.cfg["web"]["paid_amount_field"] = "Betrag"          # amount_field = "Betrag" aus der Fixture
+    try:
+        st = web["client"]("stephan", "geheim")
+        assert st.get("/api/invoices/103").json()["amount_source"] == "paperless-Feld"
+        ok = st.patch("/api/invoices/103", json={"installments": [{"amount": "60", "date": D(5)},
+                                                                   {"amount": "60", "date": D(35)}]}).json()
+        assert not ok["errors"], ok["errors"]
+        e1 = st.post("/api/exports", json={"items": ["103:1"]}).json()
+        assert fields_of(web, 103)["Betrag"] == "CHF60.00"      # offener Rest
+        sync(st)                                                 # darf den Rechnungsbetrag nicht verändern
+        inv = st.get("/api/invoices/103").json()
+        assert inv["effective"]["amount"] == "120.00" and not inv["errors"]
+        e2 = st.post("/api/exports", json={"items": ["103:2"]}).json()
+        assert fields_of(web, 103)["Betrag"] == "CHF120.00" and fields_of(web, 103)["Zahlungsdatum"] == D(35)
+        st.post(f"/api/exports/{e2['id']}/revert")
+        st.post(f"/api/exports/{e1['id']}/revert")
+        f = fields_of(web, 103)
+        assert f["Betrag"] == "CHF120.00" and f["Zahlungsdatum"] is None   # Ausgangsbetrag wiederhergestellt
+        sync(st)
+        assert st.get("/api/invoices/103").json()["effective"]["amount"] == "120.00"
+        st.patch("/api/invoices/103", json={"installments": None})
+    finally:
+        engine.cfg["web"] = old_web

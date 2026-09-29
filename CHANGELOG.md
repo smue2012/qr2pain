@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1 – 2026-09-29
+
+- «zahlbetrag» kann zugleich das Betragsfeld für Rechnungen ohne QR-Betrag sein: Nach dem ersten Export wird es nicht
+  mehr als Rechnungsbetrag gelesen, «Rückgängig» stellt den ursprünglichen Betrag wieder her
+
 ## 1.3.0 – 2026-09-29
 
 - Zahlbetrag und Zahlungsdatum werden nach dem Export in benutzerdefinierte paperless-Felder geschrieben

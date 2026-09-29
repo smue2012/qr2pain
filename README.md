@@ -127,6 +127,12 @@ Nach jedem Export schreibt qr2pain zwei benutzerdefinierte Felder ins paperless-
 | alle Raten exportiert | Summe aller Raten | Ausführungsdatum der letzten Rate |
 | Export rückgängig gemacht | wird neu berechnet bzw. geleert | wird neu berechnet bzw. geleert |
 
+Das Feld darf dasselbe sein wie `amount_field` (Betrag für Rechnungen ohne QR-Betrag). qr2pain liest den Betrag dann
+nur, solange noch nichts exportiert ist, und stellt beim «Rückgängig» den ursprünglich erfassten Betrag wieder her.
+
+Geschrieben wird mit dem paperless-Konto des angemeldeten Benutzers: Fehlt das Änderungsrecht am Dokument, lehnt
+paperless die Änderung ab und qr2pain zeigt eine Warnung. Die übrigen Felder des Dokuments bleiben unverändert.
+
 Am besten legst du «zahlbetrag» als Feldtyp *Geldbetrag* und «zahlungsdatum» als *Datum* an. Das Zahlungsdatum ist
 das gewünschte Ausführungsdatum aus der pain.001, nicht die tatsächliche Belastung durch die Bank.
 

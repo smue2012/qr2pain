@@ -41,6 +41,9 @@ session_hours = 8
 # allowed_users = ["stephan", "buchhaltung"]   # leer = alle paperless-Benutzer
 
 due_field = "Fällig am"           # paperless-Datumsfeld mit der Fälligkeit (optional)
+# Nach dem Export zurückschreiben (Felder in paperless anlegen; fehlt ein Feld, wird es übersprungen):
+# paid_amount_field = "zahlbetrag"      # Geldbetrag: bezahlt, bei Raten der offene Rest bis zur letzten Rate
+# paid_date_field   = "zahlungsdatum"   # Datum: Ausführungsdatum, bei Raten erst nach der letzten Rate ("" = aus)
 default_terms_days = 30           # ohne Fälligkeitsfeld: Dokumentdatum + x Tage
 lead_days = 1                     # Ausführung x Tage vor Fälligkeit (nächster Bankwerktag davor)
 

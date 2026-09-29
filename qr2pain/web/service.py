@@ -670,7 +670,7 @@ class Engine:
                              (doc_export[doc][0], doc))
                 complete.append(doc)
 
-        warnings = []
+        warnings = self.write_payment_fields(pl, list(dict.fromkeys(e["doc_id"] for e, _ in units)))
         for doc in complete:
             ex_id, fn = doc_export[doc]
             warnings += self._tag(pl, [doc], exported=True, note=f"Zahlung exportiert in {fn} (Export #{ex_id}) durch {user}")
@@ -843,7 +843,64 @@ class Engine:
         warnings = self._tag(pl, reopened, exported=False, note=note)
         for d in notes:
             warnings += self._note(pl, d, note)
+        warnings += self.write_payment_fields(pl, docs)
         return {"id": export_id, "count": len(items), "warnings": warnings}
+
+    # ---------------------------------------------------------------- Zahlbetrag / Zahlungsdatum in paperless
+    def payment_values(self, doc_id: int) -> tuple[Decimal | None, str | None, str]:
+        """(Betrag, Datum, Währung) für die paperless-Felder.
+
+        Ganze Rechnung exportiert: bezahlter Betrag und Ausführungsdatum.
+        Raten, noch nicht alle exportiert: offener Restbetrag, kein Datum.
+        Alle Raten exportiert: Summe der Raten und Datum der letzten Rate. Nichts exportiert: beides leer."""
+        r = self.store.invoice(doc_id)
+        paid = self.paid_parts(doc_id).get(doc_id, {})
+        e = self.effective(r) if r else None
+        ccy = e["effective"]["currency"] if e else "CHF"
+        if not paid or not e:
+            return None, None, ccy
+        total = sum((Decimal(i["amount"]) for i in paid.values()), Decimal(0))
+        last = max(i["exec_date"] for i in paid.values())
+        if e["split"] and len([p for p in e["_parts"] if p["exported"]]) < len(e["_parts"]):
+            return e["_open_amount"], None, ccy
+        return total, last, ccy
+
+    def write_payment_fields(self, pl: Paperless, doc_ids: list[int]) -> list[str]:
+        w = self.cfg.get("web", {})
+        names = {"amount": w.get("paid_amount_field", "zahlbetrag"), "date": w.get("paid_date_field", "zahlungsdatum")}
+        explicit = {k for k, key in (("amount", "paid_amount_field"), ("date", "paid_date_field")) if w.get(key)}
+        fields, warnings = {}, []
+        src = (self.cfg.get("amount_field") or "").strip().lower()
+        if names["amount"] and names["amount"].strip().lower() == src:
+            warnings.append(f"Feld «{names['amount']}» ist auch der Rechnungsbetrag (amount_field) – "
+                            "Zahlbetrag wird nicht zurückgeschrieben, bitte ein eigenes Feld verwenden")
+            names["amount"] = ""
+        for kind, name in names.items():
+            if not name:
+                continue
+            try:
+                f = pl.custom_field(name)
+            except Exception as e:  # noqa: BLE001
+                return [f"paperless-Felder nicht erreichbar ({e})"]
+            if f:
+                fields[kind] = f
+            elif kind in explicit:   # nur melden, wenn ausdrücklich konfiguriert
+                warnings.append(f"Feld «{name}» gibt es in paperless nicht")
+        if not fields:
+            return warnings
+        for d in doc_ids:
+            amount, when, ccy = self.payment_values(d)
+            vals = {}
+            if "amount" in fields:
+                f = fields["amount"]
+                vals[f["id"]] = None if amount is None else field_value(f, amount, ccy)
+            if "date" in fields:
+                vals[fields["date"]["id"]] = when
+            try:
+                pl.set_custom_fields(d, vals)
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"#{d}: Zahlbetrag/Zahlungsdatum in paperless nicht gesetzt ({e})")
+        return warnings
 
     def _note(self, pl: Paperless, doc_id: int, text: str) -> list[str]:
         try:
@@ -1096,6 +1153,19 @@ def resolve_account(row: dict, currency: str, accounts: list[dict]) -> dict | No
         if a["is_default"]:
             return {"id": a["id"], "label": a["label"], "why": "Standardkonto" + (f" {a['currency']}" if a["currency"] else "")}
     return None
+
+
+def field_value(field: dict, amount: Decimal, ccy: str):
+    """Betrag passend zum Feldtyp in paperless: Geldbetrag «CHF123.45», Zahl oder Text."""
+    v = amount.quantize(Decimal("0.01"))
+    t = field.get("data_type")
+    if t == "monetary":
+        return f"{ccy}{v}"
+    if t == "float":
+        return float(v)
+    if t == "integer":
+        return int(v.to_integral_value())
+    return str(v)
 
 
 def account_debtor(a: dict) -> pain001.Debtor:

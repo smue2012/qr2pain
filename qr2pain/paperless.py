@@ -72,8 +72,27 @@ class Paperless:
         return r.json()["id"]
 
     def custom_field_id(self, name: str) -> int | None:
+        f = self.custom_field(name)
+        return f["id"] if f else None
+
+    def custom_field(self, name: str) -> dict | None:
+        """Benutzerdefiniertes Feld mit id, name und data_type (Gross-/Kleinschreibung egal)."""
         res = self._get("/api/custom_fields/", name__iexact=name)["results"]
-        return res[0]["id"] if res else None
+        return res[0] if res else None
+
+    def set_custom_fields(self, doc_id: int, values: dict[int, object]) -> None:
+        """Werte benutzerdefinierter Felder setzen, übrige Felder des Dokuments bleiben erhalten.
+
+        None leert ein vorhandenes Feld (es bleibt am Dokument) bzw. fügt es gar nicht erst hinzu."""
+        doc = self.get_document(doc_id)
+        current = doc.get("custom_fields") or []
+        present = {c["field"] for c in current}
+        out = [c if c["field"] not in values else {"field": c["field"], "value": values[c["field"]]} for c in current]
+        out += [{"field": k, "value": v} for k, v in values.items() if k not in present and v is not None]
+        if out == current:
+            return
+        r = self.s.patch(f"{self.base}/api/documents/{doc_id}/", json={"custom_fields": out}, timeout=self.timeout)
+        r.raise_for_status()
 
     # ------------------------------------------------------------ Dokumente
     def documents(self, with_tags: list[int], without_tags: list[int]):

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.0 – 2026-09-29
+
+- Zahlbetrag und Zahlungsdatum werden nach dem Export in benutzerdefinierte paperless-Felder geschrieben
+  (`zahlbetrag`, `zahlungsdatum`; bei Raten der offene Restbetrag, Datum erst nach der letzten Rate)
+- «Rückgängig» berechnet die Felder neu bzw. leert sie
+
 ## 1.2.0 – 2026-09-29
 
 **Verbuchungsart (BtchBookg)**

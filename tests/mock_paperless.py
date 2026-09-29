@@ -84,7 +84,8 @@ TAGS = {1: "QR zu zahlen", 20: "Firma B"}
 STORAGE_PATHS = {1: "Firma B/Rechnungen"}
 CORR = {1: "Robert Schneider AG", 2: "Müller & Söhne", 3: "Verein Beispiel", 4: "CKW", 5: "Hostpoint",
         6: "Lyreco", 7: "Peoplefone", 8: "Grenke"}
-FIELDS = {11: "Fällig am", 12: "Betrag"}
+FIELDS = {11: "Fällig am", 12: "Betrag", 13: "Zahlbetrag", 14: "Zahlungsdatum"}
+FIELD_TYPES = {11: "date", 12: "monetary", 13: "monetary", 14: "date"}
 USERS = {"stephan": ("geheim", "tok-stephan"), "buchhaltung": ("geheim2", "tok-bh")}
 SUPERUSERS = {"tok-stephan"}
 # Benutzer "buchhaltung" sieht nur diese Dokumente (Objektrechte wie in paperless)
@@ -143,7 +144,8 @@ class H(BaseHTTPRequestHandler):
             return self._list([{"id": k, "name": v} for k, v in TAGS.items() if not n or v.lower() == n])
         if p == "/api/custom_fields/":
             n = q.get("name__iexact", "").lower()
-            return self._list([{"id": k, "name": v} for k, v in FIELDS.items() if not n or v.lower() == n])
+            return self._list([{"id": k, "name": v, "data_type": FIELD_TYPES[k]}
+                               for k, v in FIELDS.items() if not n or v.lower() == n])
         if p == "/api/storage_paths/":
             return self._list([{"id": k, "name": v} for k, v in STORAGE_PATHS.items()])
         if p == "/api/correspondents/":
@@ -203,8 +205,11 @@ class H(BaseHTTPRequestHandler):
         if not can_see(self.tok, int(m.group(1))):
             return self._send(404, {"detail": "Not found"})
         b = self._body()
-        DOCS[int(m.group(1))]["tags"] = b["tags"]
-        LOG["patch"].append((int(m.group(1)), b["tags"]))
+        if "tags" in b:
+            DOCS[int(m.group(1))]["tags"] = b["tags"]
+            LOG["patch"].append((int(m.group(1)), b["tags"]))
+        if "custom_fields" in b:
+            DOCS[int(m.group(1))]["custom_fields"] = b["custom_fields"]
         self._send(200, pub(DOCS[int(m.group(1))]))
 
 

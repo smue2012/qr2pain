@@ -318,3 +318,38 @@ def test_booking_mode(web):
     r = st.post("/api/exports", json={"items": ["101"], "booking": {str(acc["id"]): "egal"}})
     assert r.status_code == 409
     st.patch(f"/api/accounts/{acc['id']}", json={"booking": "batch"})
+
+
+# ---------------------------------------------------------------- Zahlbetrag / Zahlungsdatum zurückschreiben
+
+def fields_of(web, doc_id):
+    m = web["mock"]
+    return {m.FIELDS[c["field"]]: c["value"] for c in m.DOCS[doc_id].get("custom_fields", [])}
+
+
+def test_payment_fields_written_back(web):
+    st = web["client"]("stephan", "geheim")
+    # ganze Rechnung: bezahlter Betrag und Ausführungsdatum
+    inv = st.get("/api/invoices/101").json()
+    ex = st.post("/api/exports", json={"items": ["101"]}).json()
+    f = fields_of(web, 101)
+    assert f["Zahlbetrag"] == f"CHF{Decimal_(inv['effective']['amount']):.2f}"
+    assert f["Zahlungsdatum"] == inv["effective"]["execution_date"]
+    assert f["Fällig am"]                                              # übrige Felder bleiben erhalten
+    st.post(f"/api/exports/{ex['id']}/revert")
+    f = fields_of(web, 101)
+    assert f["Zahlbetrag"] is None and f["Zahlungsdatum"] is None
+
+    # Raten: offener Betrag, Datum erst nach der letzten Rate
+    assert st.get("/api/invoices/108").json()["split"]
+    e1 = st.post("/api/exports", json={"items": ["108:1"]}).json()
+    f = fields_of(web, 108)
+    assert f["Zahlbetrag"] == "CHF613.40" and f.get("Zahlungsdatum") is None
+    e2 = st.post("/api/exports", json={"items": ["108:2"]}).json()
+    f = fields_of(web, 108)
+    assert f["Zahlbetrag"] == "CHF1213.40" and f["Zahlungsdatum"] == D(40)
+    st.post(f"/api/exports/{e2['id']}/revert")
+    f = fields_of(web, 108)
+    assert f["Zahlbetrag"] == "CHF613.40" and f["Zahlungsdatum"] is None
+    st.post(f"/api/exports/{e1['id']}/revert")
+    assert fields_of(web, 108)["Zahlbetrag"] is None

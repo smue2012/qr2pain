@@ -115,6 +115,21 @@ pro Datei änderbar:
 
 Einzelbuchungen kosten je nach Bank eine Gebühr pro Buchung.
 
+### Zahlbetrag und Zahlungsdatum in paperless
+
+Nach jedem Export schreibt qr2pain zwei benutzerdefinierte Felder ins paperless-Dokument, sofern es sie gibt
+(Namen einstellbar mit `paid_amount_field` / `paid_date_field` unter `[web]`, Standard `zahlbetrag` und `zahlungsdatum`):
+
+| Situation | zahlbetrag | zahlungsdatum |
+|---|---|---|
+| ganze Rechnung exportiert | bezahlter Betrag | Ausführungsdatum |
+| Ratenzahlung, noch Raten offen | offener Restbetrag | leer |
+| alle Raten exportiert | Summe aller Raten | Ausführungsdatum der letzten Rate |
+| Export rückgängig gemacht | wird neu berechnet bzw. geleert | wird neu berechnet bzw. geleert |
+
+Am besten legst du «zahlbetrag» als Feldtyp *Geldbetrag* und «zahlungsdatum» als *Datum* an. Das Zahlungsdatum ist
+das gewünschte Ausführungsdatum aus der pain.001, nicht die tatsächliche Belastung durch die Bank.
+
 ### Ausführungsdatum
 
 Standard ist die Fälligkeit minus `lead_days`, auf den vorherigen Bankwerktag gelegt, frühestens aber

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2 – 2026-09-29
+
+- von qr2pain angelegte Tags («Ratenzahlung», «QR exportiert») haben keinen Eigentümer mehr und sind für alle
+  paperless-Benutzer sichtbar; bisher gehörten sie dem angemeldeten Benutzer und erschienen bei anderen als «privat»
+
 ## 1.3.1 – 2026-09-29
 
 - «zahlbetrag» kann zugleich das Betragsfeld für Rechnungen ohne QR-Betrag sein: Nach dem ersten Export wird es nicht

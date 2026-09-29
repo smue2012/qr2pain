@@ -189,9 +189,11 @@ Für Monitoring gibt es `GET /api/health` (ohne Anmeldung). Das Docker-Image nut
 
 ### paperless vorbereiten
 
-1. Tag **«QR zu zahlen»** anlegen. «QR exportiert» legt qr2pain selbst an.
+1. Tag **«QR zu zahlen»** anlegen. «QR exportiert» und «Ratenzahlung» legt qr2pain selbst an, ohne Eigentümer,
+   damit alle Benutzer sie sehen. Du kannst sie auch vorher selbst anlegen.
 2. Optional das Datumsfeld **«Fällig am»** anlegen und bei Rechnungen befüllen, z. B. per Workflow.
-3. Optional ein Monetary-Feld **«Betrag»** für QR-Rechnungen ohne Betrag.
+3. Optional ein Geldbetrag-Feld für QR-Rechnungen ohne Betrag (`amount_field`) sowie die Felder **«zahlbetrag»**
+   (Geldbetrag) und **«zahlungsdatum»** (Datum) für das Zurückschreiben nach dem Export.
 4. Den qr2pain-Benutzern Leserechte auf die Rechnungen geben und Änderungsrechte für Tags und Notizen.
 
 ## Kommandozeile

@@ -121,6 +121,10 @@ def test_duplicates_installments_export_revert(web):
                                                                {"amount": "613.40", "date": D(40)}]}).json()
     assert ok["split"] and ok["exportable"] and not ok["errors"]
     assert "Ratenzahlung" in tag_names(web, 108)
+    m = web["mock"]
+    for name in ("Ratenzahlung",):   # von qr2pain angelegte Tags gehören niemandem (sonst «privat»)
+        tid = next(k for k, v in m.TAGS.items() if v == name)
+        assert m.TAG_OWNERS[tid] is None
 
     ex = st.post("/api/exports", json={"items": ["108:1", "105", "102"]}).json()
     xml = st.get(f"/api/exports/{ex['id']}/xml").text
@@ -132,6 +136,7 @@ def test_duplicates_installments_export_revert(web):
     assert any("bereits bezahlt" in e for e in L[106]["errors"])        # Duplikat gegen Historie
     assert st.patch("/api/invoices/108", json={"amount": "1"}).status_code == 400   # gesperrt
     assert "QR exportiert" in tag_names(web, 102) and "QR zu zahlen" in tag_names(web, 108)
+    assert web["mock"].TAG_OWNERS[next(k for k, v in web["mock"].TAGS.items() if v == "QR exportiert")] is None
 
     # Export mit fremder Position: buchhaltung sieht nur eigene, darf nicht herunterladen
     bh = web["client"]("buchhaltung", "geheim2")

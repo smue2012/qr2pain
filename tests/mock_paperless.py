@@ -81,6 +81,7 @@ for i, (title, c, due, kw, amt) in SPEC.items():
                        b'<text x="60" y="80" font-size="20">Rechnung (Scan ohne QR-Code)</text></svg>'),
     }
 TAGS = {1: "QR zu zahlen", 20: "Firma B"}
+TAG_OWNERS: dict = {}
 STORAGE_PATHS = {1: "Firma B/Rechnungen"}
 CORR = {1: "Robert Schneider AG", 2: "Müller & Söhne", 3: "Verein Beispiel", 4: "CKW", 5: "Hostpoint",
         6: "Lyreco", 7: "Peoplefone", 8: "Grenke"}
@@ -189,7 +190,8 @@ class H(BaseHTTPRequestHandler):
             b = self._body()
             i = max(TAGS) + 1
             TAGS[i] = b["name"]
-            return self._send(201, {"id": i, "name": b["name"]})
+            TAG_OWNERS[i] = b["owner"] if "owner" in b else self.tok   # wie paperless: sonst Ersteller
+            return self._send(201, {"id": i, "name": b["name"], "owner": TAG_OWNERS[i]})
         m = re.fullmatch(r"/api/documents/(\d+)/notes/", u)
         if m and not can_see(self.tok, int(m.group(1))):
             return self._send(404, {"detail": "Not found"})

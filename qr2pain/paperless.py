@@ -67,7 +67,8 @@ class Paperless:
             return res[0]["id"]
         if not create:
             raise PaperlessError(f"Tag '{name}' existiert nicht")
-        r = self.s.post(f"{self.base}/api/tags/", json={"name": name}, timeout=self.timeout)
+        # ohne Eigentümer anlegen: sonst gehört das Tag dem angemeldeten Benutzer und ist für alle anderen «privat»
+        r = self.s.post(f"{self.base}/api/tags/", json={"name": name, "owner": None}, timeout=self.timeout)
         r.raise_for_status()
         return r.json()["id"]
 

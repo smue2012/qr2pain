@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     is_default  INTEGER NOT NULL DEFAULT 0,
     sort        INTEGER NOT NULL DEFAULT 100,
     active      INTEGER NOT NULL DEFAULT 1,
+    booking     TEXT NOT NULL DEFAULT 'batch',  -- batch = Sammelbuchung, single = Einzelbuchung, bank = Bankvorgabe
     updated_at  TEXT,
     updated_by  TEXT
 );
@@ -114,6 +115,9 @@ class Store:
         if "tags" not in cols:
             self.db.execute("ALTER TABLE invoices ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
             self.db.execute("ALTER TABLE invoices ADD COLUMN storage_path TEXT")
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(accounts)").fetchall()}
+        if "booking" not in cols:  # 1.2: Verbuchungsart
+            self.db.execute("ALTER TABLE accounts ADD COLUMN booking TEXT NOT NULL DEFAULT 'batch'")
 
     # ------------------------------------------------------------ generisch
     def q(self, sql: str, *args) -> list[dict]:

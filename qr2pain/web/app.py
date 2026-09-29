@@ -325,13 +325,14 @@ class ExportReq(BaseModel):
     ids: list[int | str] = []     # 101 = ganze Rechnung, "101:2" = Rate 2
     items: list[str] = []
     accounts: dict[str, int | None] = {}   # Übersteuerung: {"<Konto-ID>"|"none": Ziel-Konto-ID}
+    booking: dict[str, str] = {}           # Verbuchungsart pro Ziel-Konto: batch | single | bank
 
 
 @app.post("/api/exports")
 def create_export(body: ExportReq, s: Session = Depends(session)):
     access.require(s, {str(i).partition(":")[0] for i in [*body.ids, *body.items]})
     try:
-        return engine.export(s.paperless(), s.user, [*body.ids, *body.items], body.accounts)
+        return engine.export(s.paperless(), s.user, [*body.ids, *body.items], body.accounts, body.booking)
     except ValueError as e:
         _err(e, 409)
 

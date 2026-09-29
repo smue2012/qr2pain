@@ -97,10 +97,17 @@ def _amt(v: Decimal) -> str:
     return f"{v.quantize(Decimal('0.01'))}"
 
 
+BOOKING_MODES = {"batch": "true", "single": "false", "bank": None}
+
+
 def build(debtor: Debtor, payments: list[Payment], execution_date: date,
-          initiating_party: str | None = None, msg_id: str | None = None) -> bytes:
+          initiating_party: str | None = None, msg_id: str | None = None, booking: str = "batch") -> bytes:
+    """booking: «batch» = Sammelbuchung (BtchBookg true), «single» = Einzelbuchung (false),
+    «bank» = Element weglassen, die Bank entscheidet nach Vertrag."""
     if not payments:
         raise ValueError("Keine Zahlungen")
+    if booking not in BOOKING_MODES:
+        raise ValueError(f"Verbuchungsart {booking!r} unbekannt")
     debtor.check()
 
     now = datetime.now().astimezone().replace(microsecond=0)
@@ -135,7 +142,8 @@ def build(debtor: Debtor, payments: list[Payment], execution_date: date,
         pi = _sub(root, "PmtInf")
         _sub(pi, "PmtInfId", ref_id(f"{msg_id[:30]}-{n}"))
         _sub(pi, "PmtMtd", "TRF")
-        _sub(pi, "BtchBookg", "true")
+        if BOOKING_MODES[booking] is not None:
+            _sub(pi, "BtchBookg", BOOKING_MODES[booking])
         _sub(pi, "NbOfTxs", str(len(group)))
         _sub(pi, "CtrlSum", _amt(sum((p.amount for p in group), Decimal(0))))
         red = _sub(pi, "ReqdExctnDt")

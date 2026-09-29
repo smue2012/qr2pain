@@ -322,6 +322,9 @@ legend { font-size: 12px; font-weight: 600; color: var(--text-2); text-transform
 .modal-card { width: min(640px, 100%); }
 .exp-group { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; display: grid; gap: 8px; }
 .exp-group .grid th, .exp-group .grid td { padding: 5px 8px; }
+.exp-sel { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+.exp-sel .f { grid-column: auto; min-width: 0; }
+@media (max-width: 600px) { .exp-sel { grid-template-columns: 1fr; } }
 .file-list { list-style: none; padding: 0; display: grid; gap: 8px; }
 .file-list li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 @media (max-width: 1200px) { .hide-md { display: none; } }

@@ -286,3 +286,35 @@ def test_liquidity_horizon_scheduled_and_balance(web):
     assert st.get(f"/api/stats?account={acc['id']}").json()["balances"] == {}
     assert st.put("/api/balances", json={"account_id": acc["id"], "currency": "CHF"},
                   headers={"X-Requested-With": ""}).status_code == 403                    # CSRF
+
+
+
+# ---------------------------------------------------------------- Verbuchungsart
+
+def test_booking_mode(web):
+    st = web["client"]("stephan", "geheim")
+    acc = next(a for a in st.get("/api/accounts").json() if a["label"] == "Firma A CHF")
+    assert acc["booking"] == "batch"                                          # Standard: Sammelbuchung
+    assert st.patch(f"/api/accounts/{acc['id']}", json={"booking": "quer"}).status_code == 400
+    assert st.patch(f"/api/accounts/{acc['id']}", json={"booking": "single"}).json()["booking"] == "single"
+
+    def xml_of(body):
+        r = st.post("/api/exports", json=body)
+        assert r.status_code == 200, r.text
+        x = r.json()["exports"][0]
+        xml = st.get(f"/api/exports/{x['id']}/xml").text
+        XSD.validate(xml)
+        st.post(f"/api/exports/{x['id']}/revert")
+        return x, xml
+
+    x, xml = xml_of({"items": ["101"]})                                       # Vorgabe des Kontos
+    assert x["booking"] == "single" and "<BtchBookg>false</BtchBookg>" in xml
+    x, xml = xml_of({"items": ["101"], "booking": {str(acc["id"]): "batch"}})  # beim Export übersteuert
+    assert "<BtchBookg>true</BtchBookg>" in xml
+    x, xml = xml_of({"items": ["101"], "booking": {str(acc["id"]): "bank"}})   # Feld weglassen
+    assert "BtchBookg" not in xml
+    ex = next(e for e in st.get("/api/exports").json() if e["id"] == x["id"])
+    assert ex["account"]["booking"] == "bank"
+    r = st.post("/api/exports", json={"items": ["101"], "booking": {str(acc["id"]): "egal"}})
+    assert r.status_code == 409
+    st.patch(f"/api/accounts/{acc['id']}", json={"booking": "batch"})

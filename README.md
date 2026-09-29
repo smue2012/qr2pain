@@ -104,6 +104,17 @@ vorkommen, werden beim Löschen nur deaktiviert.
 
 Beim ersten Start wird das Konto aus `[debtor]` der `config.toml` als «Standard» übernommen.
 
+**Verbuchung auf dem Kontoauszug** (pain.001-Feld `BtchBookg`), pro Konto voreingestellt und im Export-Dialog
+pro Datei änderbar:
+
+| Einstellung | pain.001 | Wirkung |
+|---|---|---|
+| Sammelbuchung (Standard) | `true` | eine Belastung pro Ausführungsdatum und Währung (Sammelbeleg) |
+| Einzelbuchung | `false` | jede Zahlung als eigene Buchung, einfacher abzugleichen |
+| Vorgabe der Bank | Feld fehlt | es gilt die Einstellung im E-Banking-Vertrag |
+
+Einzelbuchungen kosten je nach Bank eine Gebühr pro Buchung.
+
 ### Ausführungsdatum
 
 Standard ist die Fälligkeit minus `lead_days`, auf den vorherigen Bankwerktag gelegt, frühestens aber

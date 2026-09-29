@@ -324,6 +324,11 @@ $("#btn-hold").addEventListener("click", () => setHeld(selDocs(), true));
 $("#btn-release").addEventListener("click", () => setHeld(selDocs(), false));
 
 // ================================================================ Export
+const BOOKING = [["batch", "Sammelbuchung", "eine Belastung pro Ausführungsdatum und Währung"],
+  ["single", "Einzelbuchung", "jede Zahlung einzeln auf dem Kontoauszug"],
+  ["bank", "Vorgabe der Bank", "Feld weglassen, es gilt die Einstellung im E-Banking-Vertrag"]];
+const bookingLabel = (m) => (BOOKING.find((b) => b[0] === m) || BOOKING[0])[1];
+const bookingOpts = (cur) => BOOKING.map(([v, t, d]) => `<option value="${v}" title="${d}" ${v === cur ? "selected" : ""}>${t}</option>`).join("");
 $("#btn-export").addEventListener("click", async () => {
   const us = selUnits();
   const ok = us.filter((u) => u.ok);
@@ -346,12 +351,17 @@ $("#btn-export").addEventListener("click", async () => {
       byDate[k] = byDate[k] || { n: 0, s: 0 };
       byDate[k].n++; byDate[k].s += Number(u.amount);
     });
+    const accNow = eligible.find((a) => String(a.id) === g.key);
     return `<div class="exp-group">
+      <div class="exp-sel">
       <label class="f">Belastungskonto für ${g.units.length} Zahlung${g.units.length > 1 ? "en" : ""}
         <select data-group="${g.key}">
           ${g.key === "none" ? `<option value="">– Konto wählen –</option>` : ""}
           ${eligible.map((a) => `<option value="${a.id}" ${String(a.id) === g.key ? "selected" : ""}>${esc(a.label)} · ${esc(fmtIban(a.iban))}${a.currency ? ` · nur ${a.currency}` : ""}</option>`).join("")}
         </select></label>
+      <label class="f">Verbuchung
+        <select data-booking="${g.key}">${bookingOpts(accNow?.booking || "batch")}</select></label>
+      </div>
       <table class="grid"><thead><tr><th>Ausführung</th><th>Währung</th><th class="num">Anzahl</th><th class="num">Summe</th></tr></thead><tbody>
       ${Object.entries(byDate).sort().map(([k, v]) => { const [d, c] = k.split("|");
         return `<tr><td>${dt(d)}</td><td>${c}</td><td class="num">${v.n}</td><td class="num">${money(v.s)}</td></tr>`; }).join("")}
@@ -364,18 +374,33 @@ $("#btn-export").addEventListener("click", async () => {
     ${skip.length ? `<p class="msg err"><b>✕</b><span>${skip.length} ausgewählte Zahlung(en) werden <b>nicht</b> exportiert (Fehler oder zurückgestellt).</span></p>` : ""}
     <p class="muted small">Lade die Datei(en) danach im E-Banking des jeweiligen Kontos hoch. Falls ein Upload scheitert,
     kannst du den Export unter «Exporte» rückgängig machen.</p>`;
-  let accMap = {};
+  let accMap = {}, bookMap = {};
   const okd = await formModal(`pain.001 mit ${ok.length} Zahlungen erstellen`, html, "Erstellen & herunterladen", (body) => {
-    accMap = {};
+    accMap = {}; bookMap = {};
     for (const sel of $$("select[data-group]", body)) {
       if (!sel.value) return "Bitte für jede Gruppe ein Belastungskonto wählen.";
       accMap[sel.dataset.group] = Number(sel.value);
+      const mode = $(`select[data-booking="${sel.dataset.group}"]`, body).value;
+      if (bookMap[sel.value] && bookMap[sel.value] !== mode) {
+        return "Gruppen mit demselben Belastungskonto landen in einer Datei – bitte dieselbe Verbuchung wählen.";
+      }
+      bookMap[sel.value] = mode;
     }
     return null;
+  }, (body) => {
+    // Kontowechsel übernimmt die Vorgabe des neuen Kontos, solange die Verbuchung nicht von Hand geändert wurde
+    $$("select[data-group]", body).forEach((sel) => {
+      const bk = $(`select[data-booking="${sel.dataset.group}"]`, body);
+      bk.addEventListener("change", () => (bk.dataset.touched = "1"));
+      sel.addEventListener("change", () => {
+        const acc = active.find((a) => String(a.id) === sel.value);
+        if (acc && !bk.dataset.touched) bk.value = acc.booking || "batch";
+      });
+    });
   });
   if (!okd) return;
   try {
-    const r = await api("exports", { method: "POST", body: { items: ok.map((u) => u.key), accounts: accMap } });
+    const r = await api("exports", { method: "POST", body: { items: ok.map((u) => u.key), accounts: accMap, booking: bookMap } });
     const files = r.exports || [{ id: r.id, filename: r.filename, count: r.count }];
     if (files.length === 1) download(files[0].id);
     toast(`${files.length > 1 ? files.length + " Exporte" : "Export #" + files[0].id} erstellt: ${r.count} Zahlungen`);
@@ -385,7 +410,7 @@ $("#btn-export").addEventListener("click", async () => {
     if (files.length > 1) {
       confirmModal("Dateien herunterladen", `<p>Pro Belastungskonto eine Datei. Jede im E-Banking des jeweiligen Kontos hochladen.</p>
         <ul class="file-list">${files.map((f) => `<li><a class="btn" href="api/exports/${f.id}/xml" download>⤓ ${esc(f.account?.label || "")}</a>
-          <span class="muted small">${f.count} Zahlung${f.count > 1 ? "en" : ""} · ${esc(f.filename)}</span></li>`).join("")}</ul>`, "");
+          <span class="muted small">${f.count} Zahlung${f.count > 1 ? "en" : ""} · ${bookingLabel(f.booking)} · ${esc(f.filename)}</span></li>`).join("")}</ul>`, "");
     }
   } catch (e) {
     confirmModal("Export nicht möglich", `<ul>${(e.list || [e.message]).map((m) => `<li>${esc(m)}</li>`).join("")}</ul>`, "");
@@ -995,6 +1020,7 @@ async function loadExports() {
         <span class="muted">${dtt(x.created_at)} · ${esc(x.created_by)}</span>
         <span>${x.items.length} Zahlung${x.items.length === 1 ? "" : "en"} · <b class="num">${tot}</b></span>
         ${x.account ? `<span class="acc-tag" title="${esc(fmtIban(x.account.iban))}">${esc(x.account.label)}</span>` : ""}
+        ${x.account?.booking ? `<span class="badge" title="Verbuchungsart in der Datei">${bookingLabel(x.account.booking)}</span>` : ""}
         ${x.reverted_at ? `<span class="badge">Rückgängig ${dt(x.reverted_at)} · ${esc(x.reverted_by)}</span>` : ""}
         ${x.hidden ? `<span class="badge" title="Diese Positionen gehören zu Dokumenten, die du in paperless nicht sehen darfst">+ ${x.hidden} Position${x.hidden > 1 ? "en" : ""} ohne Berechtigung</span>` : ""}
         <span class="spacer"></span>
@@ -1049,6 +1075,7 @@ function renderAccounts() {
         <div><div class="acc-label">${esc(a.label)}</div><div class="mono small">${esc(fmtIban(a.iban))}${a.bic ? ` · ${esc(a.bic)}` : ""}</div></div>
         <div class="badges">${a.is_default ? `<span class="badge ok">Standard</span>` : ""}
           ${a.currency ? `<span class="badge">nur ${a.currency}</span>` : `<span class="badge">alle Währungen</span>`}
+          <span class="badge" title="Verbuchung beim Export (übersteuerbar)">${bookingLabel(a.booking)}</span>
           ${a.active ? "" : `<span class="badge">inaktiv</span>`}</div>
       </div>
       <div class="small">${esc(a.name)}${a.town ? `, ${esc([a.street, a.building].filter(Boolean).join(" "))}${a.street ? ", " : ""}${esc([a.postal_code, a.town].filter(Boolean).join(" "))}` : ""}</div>
@@ -1077,7 +1104,7 @@ async function afterAccountChange() {
 
 async function editAccount(a) {
   const v = a || { label: "", name: "", iban: "", bic: "", street: "", building: "", postal_code: "", town: "", country: "CH",
-    currency: "", rules: {}, is_default: false, sort: 100, active: true };
+    currency: "", rules: {}, is_default: false, sort: 100, active: true, booking: "batch" };
   const rules = {};
   RULE_KINDS.forEach(([k]) => (rules[k] = [...(v.rules[k] || [])]));
   const f = (name, label, cls = "", extra = "") => `<label class="f ${cls}">${label}<input name="${name}" value="${esc(v[name] ?? "")}" ${extra}></label>`;
@@ -1092,6 +1119,9 @@ async function editAccount(a) {
         ${[["", "alle Währungen"], ["CHF", "nur CHF"], ["EUR", "nur EUR"]].map(([c, t]) => `<option value="${c}" ${v.currency === c ? "selected" : ""}>${t}</option>`).join("")}
       </select></label>
       ${f("sort", "Reihenfolge (kleiner = zuerst)", "s3", 'type="number" min="0"')}
+      <label class="f">Verbuchung auf dem Kontoauszug (Vorgabe, beim Export änderbar)<select name="booking">
+        ${BOOKING.map(([b, t, d]) => `<option value="${b}" ${(v.booking || "batch") === b ? "selected" : ""}>${t} – ${d}</option>`).join("")}
+      </select></label>
       <fieldset class="f rules-fs"><legend>Regeln – das Konto gilt für Rechnungen mit …</legend>
         ${RULE_KINDS.map(([k, lbl]) => `<div class="rule-row" data-kind="${k}">
           <span class="rule-lbl">${lbl}</span>
@@ -1116,7 +1146,7 @@ async function editAccount(a) {
   const ok = await formModal(a ? `Konto «${a.label}» bearbeiten` : "Konto hinzufügen", html, "Speichern", async (body) => {
     $$("[data-add]", body).forEach(addFrom);   // noch nicht übernommene Eingaben mitnehmen
     const fd = new FormData($("#acc-form", body));
-    const data = Object.fromEntries(["label", "name", "iban", "bic", "street", "building", "postal_code", "town", "country", "currency", "sort"]
+    const data = Object.fromEntries(["label", "name", "iban", "bic", "street", "building", "postal_code", "town", "country", "currency", "sort", "booking"]
       .map((k) => [k, (fd.get(k) || "").toString().trim()]));
     data.rules = rules;
     data.is_default = fd.get("is_default") === "on";

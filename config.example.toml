@@ -31,6 +31,7 @@ building    = "1"
 postal_code = "6000"
 town        = "Luzern"
 country     = "CH"
+# booking   = "batch"        # batch = Sammelbuchung, single = Einzelbuchung, bank = Vorgabe der Bank
 
 [web]
 # data_dir = "/var/lib/qr2pain"   # nur ohne Docker nötig (Docker: fix /data) – Datenbank ins Backup!

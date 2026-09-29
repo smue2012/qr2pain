@@ -529,12 +529,18 @@ class Engine:
             self._sync_lock.release()
 
     # ---------------------------------------------------------------- Export
-    def export(self, pl: Paperless, user: str, items: list, account_map: dict | None = None) -> dict:
+    def export(self, pl: Paperless, user: str, items: list, account_map: dict | None = None,
+               booking: dict | None = None) -> dict:
         """items: Dokument-IDs (ganze Rechnung) bzw. "doc:rate" für einzelne Raten.
 
         account_map: Übersteuerung pro Gruppe {"<zugeordnete Konto-ID>" | "none": Ziel-Konto-ID}.
+        booking: Verbuchungsart pro Ziel-Konto {"<Konto-ID>": "batch"|"single"|"bank"}, sonst Vorgabe des Kontos.
         Pro Belastungskonto entsteht eine eigene pain.001-Datei."""
         account_map = {str(k): v for k, v in (account_map or {}).items() if v not in (None, "")}
+        booking = {str(k): v for k, v in (booking or {}).items() if v}
+        bad = [v for v in booking.values() if v not in pain001.BOOKING_MODES]
+        if bad:
+            raise ValueError([f"Verbuchungsart «{bad[0]}» unbekannt"])
         paid = self.paid_parts()
         idx = self.dup_index(paid)
         wanted: dict[int, set[int]] = defaultdict(set)
@@ -608,9 +614,10 @@ class Engine:
         if problems:
             raise ValueError(problems)
 
-        runs = []   # (konto, units, payments, xml, msg_id)
+        runs = []   # (konto, units, payments, xml, msg_id, verbuchung)
         for acc_id, grp in groups.items():
             acc = accounts[acc_id]
+            mode = booking.get(str(acc_id)) or acc.get("booking") or "batch"
             payments = []
             for e, p in grp:
                 e2e = f"PL{e['doc_id']}" + (f"-ASN{e['asn']}" if e["asn"] else "")
@@ -622,15 +629,15 @@ class Engine:
                 else:
                     payments.append(pain001.Payment(e["_bill"], e2e, e["_amount"], e["_exec"]))
             xml = pain001.build(account_debtor(acc), payments, next_business_day(date.today()),
-                                self.cfg.get("initiating_party") or acc["name"])
+                                self.cfg.get("initiating_party") or acc["name"], booking=mode)
             msg_id = re.search(rb"<MsgId>([^<]+)</MsgId>", xml).group(1).decode()
-            runs.append((acc, grp, payments, xml, msg_id))
+            runs.append((acc, grp, payments, xml, msg_id, mode))
 
         created, doc_export = [], {}
         complete, partial = [], []
         with self.store.tx() as s:
-            for acc, grp, payments, xml, msg_id in runs:
-                snap = json.dumps({k: acc[k] for k in ("label", "name", "iban", "bic", "currency")})
+            for acc, grp, payments, xml, msg_id, mode in runs:
+                snap = json.dumps({**{k: acc[k] for k in ("label", "name", "iban", "bic", "currency")}, "booking": mode})
                 cur = s.db.execute("INSERT INTO exports (msg_id, created_at, created_by, filename, xml, account_id, debtor) "
                                    "VALUES (?,?,?,?,?,?,?)", (msg_id, now(), user, "", xml, acc["id"], snap))
                 export_id = cur.lastrowid
@@ -645,10 +652,10 @@ class Engine:
                     what = f"Rate {p['no']}/{p['of']}, " if p else ""
                     s.db.execute("INSERT INTO audit (ts,user,doc_id,action,detail) VALUES (?,?,?,?,?)",
                                  (now(), user, e["doc_id"], "Exportiert",
-                                  f"Export #{export_id} ({acc['label']}), {what}{b.currency} {pay.amount}, "
+                                  f"Export #{export_id} ({acc['label']}, {BOOKING_LABEL[mode]}), {what}{b.currency} {pay.amount}, "
                                   f"Ausführung {pay.execution_date}"))
                     doc_export[e["doc_id"]] = (export_id, filename)
-                created.append({"id": export_id, "filename": filename, "count": len(grp),
+                created.append({"id": export_id, "filename": filename, "count": len(grp), "booking": mode,
                                 "account": {"id": acc["id"], "label": acc["label"], "iban": acc["iban"]}})
             for doc in dict.fromkeys(e["doc_id"] for e, _ in units):
                 e = next(e for e, _ in units if e["doc_id"] == doc)
@@ -720,18 +727,20 @@ class Engine:
 
     # ---------------------------------------------------------------- Konten
     ACCOUNT_FIELDS = ("label", "name", "iban", "bic", "street", "building", "postal_code", "town", "country",
-                      "currency", "rules", "is_default", "sort", "active")
+                      "currency", "rules", "is_default", "sort", "active", "booking")
 
     def import_config_account(self) -> None:
         """Beim ersten Start mit Kontenverwaltung: Konto aus der config.toml übernehmen."""
         if self.store.one("SELECT id FROM accounts LIMIT 1") or not self.cfg.get("debtor"):
             return
         d = self.cfg["debtor"]
-        self.store.x("INSERT INTO accounts (label,name,iban,bic,street,building,postal_code,town,country,"
-                     "is_default,sort,updated_at,updated_by) VALUES (?,?,?,?,?,?,?,?,?,1,10,?,?)",
+        self.store.x("INSERT INTO accounts (label,name,iban,bic,street,building,postal_code,town,country,booking,"
+                     "is_default,sort,updated_at,updated_by) VALUES (?,?,?,?,?,?,?,?,?,?,1,10,?,?)",
                      "Standard", d.get("name", ""), d.get("iban", "").replace(" ", "").upper(), d.get("bic", ""),
                      d.get("street", ""), d.get("building", ""), d.get("postal_code", ""), d.get("town", ""),
-                     d.get("country", "CH"), now(), "config.toml")
+                     d.get("country", "CH"),
+                     d.get("booking", "batch") if d.get("booking") in pain001.BOOKING_MODES else "batch",
+                     now(), "config.toml")
         acc_id = self.store.one("SELECT id FROM accounts ORDER BY id LIMIT 1")["id"]
         self.store.x("UPDATE exports SET account_id=? WHERE account_id IS NULL", acc_id)   # bisherige Exporte
 
@@ -743,7 +752,8 @@ class Engine:
         if account_id and not old:
             raise KeyError(account_id)
         acc = dict(old or {"bic": "", "street": "", "building": "", "postal_code": "", "town": "",
-                           "country": "CH", "currency": "", "rules": "{}", "is_default": 0, "sort": 100, "active": 1})
+                           "country": "CH", "currency": "", "rules": "{}", "is_default": 0, "sort": 100, "active": 1,
+                           "booking": "batch"})
         acc["rules"] = json.loads(acc["rules"]) if isinstance(acc["rules"], str) else acc["rules"]
         acc.update(data)
         # Prüfung
@@ -767,6 +777,9 @@ class Engine:
             raise ValueError("Währung: leer, CHF oder EUR")
         if not re.fullmatch(r"[A-Z]{2}", acc["country"]):
             raise ValueError("Land: zweistelliger Code, z. B. CH")
+        acc["booking"] = acc.get("booking") or "batch"
+        if acc["booking"] not in pain001.BOOKING_MODES:
+            raise ValueError("Verbuchung: batch, single oder bank")
         rules = acc.get("rules") or {}
         if not isinstance(rules, dict):
             raise ValueError("Regeln ungültig")
@@ -1006,6 +1019,7 @@ class Engine:
         }
 
 
+BOOKING_LABEL = {"batch": "Sammelbuchung", "single": "Einzelbuchung", "bank": "Bankvorgabe"}
 MONTHS = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
 DAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 HORIZONS = {"30d": ("day", 30), "8w": ("week", 8), "3m": ("week", 13), "6m": ("month", 6), "12m": ("month", 12)}

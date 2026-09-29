@@ -52,6 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = tomllib.loads(Path(args.config).read_text(encoding="utf-8"))
     pcfg, dcfg, tcfg = cfg["paperless"], cfg["debtor"], cfg.get("tags", {})
 
+    dcfg = dict(dcfg)
+    booking = dcfg.pop("booking", "batch")
     debtor = pain001.Debtor(**dcfg)
     try:
         debtor.check()
@@ -117,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         log.warning("Keine exportierbaren Rechnungen gefunden.")
         return 1 if errors else 0
 
-    xml = pain001.build(debtor, payments, exec_date, cfg.get("initiating_party"))
+    xml = pain001.build(debtor, payments, exec_date, cfg.get("initiating_party"), booking=booking)
     out = Path(args.out or f"pain001_{datetime.now():%Y%m%d_%H%M%S}.xml")
     out.write_bytes(xml)
 

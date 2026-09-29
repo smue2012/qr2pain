@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.0 – 2026-09-29
+
+**Verbuchungsart (BtchBookg)**
+- pro Zahlungskonto wählbar: Sammelbuchung (Standard, wie bisher), Einzelbuchung oder Vorgabe der Bank
+- im Export-Dialog pro Datei übersteuerbar; die gewählte Art steht in der Exporthistorie
+- Kommandozeile: `booking = "batch" | "single" | "bank"` im Abschnitt `[debtor]`
+
 ## 1.1.1 – 2026-09-29
 
 - Kontostand wird nach kurzer Tipp-Pause oder mit Enter gespeichert, mit Rückmeldung «✓ gespeichert» neben dem Feld

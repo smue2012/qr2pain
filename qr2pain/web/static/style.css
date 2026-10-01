@@ -360,3 +360,4 @@ label.inline select { width: auto; min-height: 32px; padding: 4px 8px; }
 .tip { white-space: pre-line; text-align: left; }
 .tile .value { white-space: nowrap; font-size: clamp(18px, 1.7vw, 24px); }
 @media (min-width: 901px) { label.inline { white-space: nowrap; } }
+.warn-ink { color: var(--warning-ink); }

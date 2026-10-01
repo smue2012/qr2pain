@@ -151,6 +151,13 @@ class Engine:
             if not ov.get("iban"):
                 errors.append(f"{row['scan_error']} – Zahlungsdaten manuell erfassen")
 
+        extra_bills = []          # weitere QR-Codes im selben Dokument (z. B. Ratenscheine)
+        for raw in row.get("qr_extra") or []:
+            try:
+                extra_bills.append(_parse_cached(raw))
+            except QRBillError:
+                pass
+
         # --- Korrekturen anwenden
         if ov.get("iban"):
             bill = replace(bill, iban=ov["iban"].replace(" ", "").upper())
@@ -162,8 +169,11 @@ class Engine:
         if ov.get("currency"):
             bill = replace(bill, currency=ov["currency"])
         cred_ov = {k: ov[f"creditor_{k}"] for k in CREDITOR_KEYS if f"creditor_{k}" in ov}
-        if cred_ov:
-            c = bill.creditor
+
+        def fix_creditor(b: QRBill) -> QRBill:
+            if not cred_ov:
+                return b
+            c = b.creditor
             if c.adr_type == "K":  # kombinierte Adresse bei Korrektur in strukturierte überführen
                 m = re.match(r"^\s*(\d{4,5})\s+(.+)$", c.building_or_line2)
                 c = Address("S", c.name, c.street_or_line1, "",
@@ -173,11 +183,20 @@ class Engine:
             c = replace(c, adr_type="S", **{mapping[k]: (v or "").strip() for k, v in cred_ov.items()})
             if c.country:
                 c = replace(c, country=c.country.upper())
-            bill = replace(bill, creditor=c)
+            return replace(b, creditor=c)
+
+        bill = fix_creditor(bill)
+        # Korrekturen am Empfänger und an der Währung gelten für alle Einzahlungsscheine des Dokuments
+        qr_bills = [bill] + [fix_creditor(replace(b, currency=ov["currency"]) if ov.get("currency") else b)
+                             for b in extra_bills] if row.get("qr_raw") else [bill]
+        multi = len(qr_bills) > 1
 
         # --- Betrag
         amount = to_amount(ov.get("amount")) if ov.get("amount") not in (None, "") else None
         amount_src = "korrigiert"
+        if amount is None and multi and all(b.amount is not None for b in qr_bills):
+            amount = sum((b.amount for b in qr_bills), Decimal(0)).quantize(Decimal("0.01"))
+            amount_src = f"{len(qr_bills)} QR-Codes"
         if amount is None and bill.amount is not None:
             amount, amount_src = bill.amount.quantize(Decimal("0.01")), "QR-Code"
         if amount is None and row.get("pl_amount"):
@@ -185,7 +204,7 @@ class Engine:
         if amount is None:
             errors.append("Kein Betrag – bitte erfassen")
             amount_src = ""
-        if bill.amount is not None and amount is not None and amount != bill.amount:
+        if not multi and bill.amount is not None and amount is not None and amount != bill.amount:
             diff = bill.amount - amount
             warnings.append(f"Betrag weicht vom QR-Code ab ({bill.currency} {bill.amount} → {amount}, "
                             f"Differenz {diff:+.2f})")
@@ -213,6 +232,10 @@ class Engine:
             exec_date = self.default_exec_date(due, today)
         # --- Aufteilung in Raten
         plan = ov.get("installments") or []
+        plan_auto = False
+        if not plan and multi:
+            plan, plan_auto = self.qr_plan(qr_bills, due, today), True
+        qr_based = any("qr" in p for p in plan)
         parts: list[dict] = []
         open_amount = amount
         if plan:
@@ -223,25 +246,46 @@ class Engine:
                 pa, pd = to_amount(p.get("amount")), to_date(p.get("date"))
                 done = paid_here.get(n)
                 perr = []
+                pb = None
+                if "qr" in p:
+                    qi = p["qr"]
+                    pb = qr_bills[qi] if isinstance(qi, int) and 0 <= qi < len(qr_bills) else None
+                    if pb is None and not done:
+                        perr.append("Einzahlungsschein nicht mehr im Dokument")
                 if not done:
                     if pa is None or pa <= 0:
                         perr.append("Betrag fehlt")
                     if not pd:
                         perr.append("Datum fehlt")
                     elif pd < today:
-                        perr.append("Datum liegt in der Vergangenheit")
+                        perr.append("Datum liegt in der Vergangenheit" + (
+                            " – bereits bezahlt? Dann die Rate in der Aufteilung entfernen" if pb else ""))
+                    if pb and pa:
+                        try:
+                            validate(replace(pb, amount=pa))
+                        except QRBillError as ex:
+                            perr.append(str(ex))
                     open_amount += pa or Decimal(0)
                 total += pa or Decimal(0)
                 parts.append({"no": n, "of": n_total, "amount": str(pa) if pa is not None else None,
                               "date": pd.isoformat() if pd else None, "errors": perr,
                               "exported": bool(done), "export_id": done["export_id"] if done else None,
-                              "_amount": pa, "_date": pd})
-            if amount is not None and total != amount:
+                              "qr": p.get("qr"), "reference": pb.reference if pb else None,
+                              "message": pb.message if pb else None,
+                              "estimated": bool(p.get("estimated")) and not done,
+                              "_amount": pa, "_date": pd, "_bill": pb})
+            if qr_based and "amount" not in ov:
+                # jeder Einzahlungsschein ist eine eigene Zahlung: Gesamtbetrag = Summe der Raten
+                amount, amount_src = total.quantize(Decimal("0.01")), f"{len(qr_bills)} QR-Codes"
+            elif amount is not None and total != amount:
                 errors.append(f"Raten ergeben {bill.currency} {total:.2f}, zu zahlen sind {amount:.2f} "
                               f"(Differenz {amount - total:+.2f})")
             open_parts = [p for p in parts if not p["exported"]]
             if open_parts and open_parts[0]["_date"]:
                 exec_date = min(p["_date"] for p in open_parts if p["_date"])
+            if plan_auto and row["status"] == "open":
+                if any(p["estimated"] for p in parts):
+                    warnings.append("Datum einzelner Raten geschätzt – bitte in der Aufteilung prüfen")
         elif due and exec_date and exec_date > due and row["status"] == "open":
             warnings.append(f"Zahlung erfolgt nach Fälligkeit ({due:%d.%m.%Y})")
 
@@ -269,6 +313,9 @@ class Engine:
             "exportable": exportable,
             "account": account, "tags": row.get("tags") or [], "storage_path": row.get("storage_path"),
             "split": bool(parts), "parts": [{k: v for k, v in p.items() if not k.startswith("_")} for p in parts],
+            "qr_count": len(qr_bills) if row.get("qr_raw") else 0, "plan_auto": plan_auto,
+            "_partkeys": [(p, dup_key(p["_bill"].iban, p["_bill"].reference, p["_amount"], p["_bill"].message))
+                          for p in parts if p["_bill"] and not p["exported"] and p["_amount"] is not None],
             "parts_done": sum(p["exported"] for p in parts),
             "open_amount": str(open_amount) if open_amount is not None else None,
             "_bill": bill, "_amount": amount, "_exec": exec_date, "_parts": parts, "_open_amount": open_amount,
@@ -280,6 +327,24 @@ class Engine:
             apply_duplicates(result, dup_index)
         return result
 
+    def qr_plan(self, bills: list[QRBill], due: date | None, today: date) -> list[dict]:
+        """Raten aus mehreren Einzahlungsscheinen: Betrag aus dem QR-Code, Datum aus dem Schein
+        (Swico-Zahlungsbedingungen oder Datum in der Mitteilung), sonst ab Fälligkeit monatlich geschätzt."""
+        plan, prev = [], None
+        for i, b in enumerate(bills):
+            found = due_from_bill(b)
+            if found:
+                d, est = found, False
+            elif prev:
+                d, est = add_months(prev, 1), True
+            else:
+                d, est = (due or today), True
+            prev = d
+            ex = d if d < today else self.default_exec_date(d, today)
+            plan.append({"amount": str(b.amount) if b.amount is not None else None, "date": ex.isoformat(),
+                         "qr": i, "estimated": est})
+        return plan
+
     def dup_index(self, paid: dict | None = None, effs: list[dict] | None = None) -> dict:
         paid = self.paid_parts() if paid is None else paid
         if effs is None:
@@ -287,8 +352,11 @@ class Engine:
             effs = [self.effective(r, paid=paid, accounts=accounts) for r in self.store.invoices("status='open'")]
         idx: dict[tuple, list[dict]] = defaultdict(list)
         for e in effs:
-            if e["status"] == "open" and e["_dupkey"]:
+            if e["status"] == "open" and e["_dupkey"] and not e["plan_auto"]:
                 idx[e["_dupkey"]].append({"kind": "open", "doc_id": e["doc_id"]})
+            if e["status"] == "open":
+                for _p, k in e["_partkeys"]:   # einzelne Einzahlungsscheine
+                    idx[k].append({"kind": "open", "doc_id": e["doc_id"]})
         per_doc: dict[int, list[dict]] = defaultdict(list)
         for it in self.store.q(
                 "SELECT i.* FROM export_items i JOIN exports x ON x.id=i.export_id "
@@ -348,9 +416,15 @@ class Engine:
                 raise ValueError(f"Rate {n}: Betrag ungültig")
             if not d:
                 raise ValueError(f"Rate {n}: Datum ungültig")
-            clean.append({"amount": str(a), "date": d.isoformat()})
+            item = {"amount": str(a), "date": d.isoformat()}
+            if p.get("qr") is not None:
+                if not isinstance(p["qr"], int) or not 0 <= p["qr"] < 100:
+                    raise ValueError(f"Rate {n}: Einzahlungsschein ungültig")
+                item["qr"] = p["qr"]
+            clean.append(item)
         for n in done:  # bereits exportierte Raten dürfen sich nicht ändern
-            if n > len(clean) or n > len(old) or clean[n - 1] != old[n - 1]:
+            o = {k: v for k, v in old[n - 1].items() if k != "estimated"} if n <= len(old) else None
+            if n > len(clean) or o is None or clean[n - 1] != o:
                 raise ValueError(f"Rate {n} ist bereits exportiert und kann nicht geändert werden")
         return clean
 
@@ -379,8 +453,12 @@ class Engine:
             if "installments" in changes and not changes["installments"]:
                 raise ValueError("Aufteilung kann nicht entfernt werden, es wurden bereits Raten exportiert")
         if changes.get("installments"):
-            changes["installments"] = self._check_installments(
-                changes["installments"], ov.get("installments") or [], done)
+            old_plan = ov.get("installments") or []
+            if not old_plan and done:   # automatisch aus den Einzahlungsscheinen gebildete Raten
+                cur = self.effective(row)
+                old_plan = [{"amount": p["amount"], "date": p["date"], **({"qr": p["qr"]} if p["qr"] is not None else {})}
+                            for p in cur["parts"]] if cur["plan_auto"] else []
+            changes["installments"] = self._check_installments(changes["installments"], old_plan, done)
             changes["execution_date"] = None  # Datum gilt pro Rate
         log = []
         for k, v in changes.items():
@@ -464,7 +542,8 @@ class Engine:
                 row = self.store.invoice(doc["id"])
                 if row and row["status"] == "exported":
                     st["done"] += 1
-                elif row and row["modified"] == doc.get("modified") and (row["qr_raw"] or row["scan_error"]):
+                elif row and row["modified"] == doc.get("modified") and (row["qr_raw"] or row["scan_error"]) \
+                        and row.get("scan_v", 1) >= SCAN_VERSION:
                     self.store.upsert_invoice(doc["id"], **meta)   # unverändert: nur Metadaten
                     st["done"] += 1
                 else:
@@ -479,23 +558,34 @@ class Engine:
                     try:
                         data, mime = fut.result()
                         payloads = find_swiss_qr(data, mime)
-                        if not payloads:
-                            qr, err = None, "Kein Swiss QR Code gefunden"
-                        else:
-                            qr, err = payloads[0], None
-                            if len(payloads) > 1:
-                                st["errors"].append(f"#{doc['id']}: {len(payloads)} QR-Codes, erster verwendet")
+                        good, bad = [], []
+                        for pl_ in payloads:
                             try:
-                                parse(qr, check=False)
+                                parse(pl_, check=False)
+                                good.append(pl_)
                             except QRBillError as e:
-                                qr, err = None, f"QR-Code unlesbar: {e}"
+                                bad.append(str(e))
+                        if good:
+                            qr, extra, err = good[0], good[1:], None
+                            if bad:
+                                st["errors"].append(f"#{doc['id']}: {len(bad)} von {len(payloads)} QR-Codes unlesbar")
+                        elif bad:
+                            qr, extra, err = None, [], f"QR-Code unlesbar: {bad[0]}"
+                        else:
+                            qr, extra, err = None, [], "Kein Swiss QR Code gefunden"
                     except Exception as e:  # noqa: BLE001
-                        qr, err = None, f"Download/Scan fehlgeschlagen: {e}"
-                    self.store.upsert_invoice(doc["id"], modified=doc.get("modified"),
-                                              qr_raw=qr, scan_error=err, **meta)
+                        qr, extra, err = None, [], f"Download/Scan fehlgeschlagen: {e}"
+                    multi_before = bool(row and row.get("qr_extra"))
+                    self.store.upsert_invoice(doc["id"], modified=doc.get("modified"), qr_raw=qr,
+                                              qr_extra=json.dumps(extra), scan_v=SCAN_VERSION, scan_error=err, **meta)
+                    if extra and not multi_before:
+                        if row:
+                            self.store.audit(user, doc["id"], "QR-Codes", f"{len(extra) + 1} QR-Codes erkannt – als Raten geführt")
+                        st["errors"] += [f"#{doc['id']}: {w}" for w in self.tag_installments(pl, doc["id"], True)]
                     if not row:
                         st["new"] += 1
-                        self.store.audit(user, doc["id"], "Importiert", err or "QR-Code gelesen")
+                        self.store.audit(user, doc["id"], "Importiert",
+                                         err or (f"{len(extra) + 1} QR-Codes gelesen" if extra else "QR-Code gelesen"))
                     st["done"] += 1
 
             # Offene Rechnungen, die dieser Benutzer nicht mehr in der Liste sieht:
@@ -586,8 +676,11 @@ class Engine:
 
         # gleiche Zahlung aus verschiedenen Dokumenten in derselben Auswahl
         keys = defaultdict(set)
-        for e, _ in units:
-            if e["_amount"] is not None:
+        for e, p in units:
+            b = (p or {}).get("_bill")
+            if b is not None and p["_amount"] is not None:      # eigener Einzahlungsschein
+                keys[dup_key(b.iban, b.reference, p["_amount"], b.message)].add(e["doc_id"])
+            elif e["_amount"] is not None and not e["plan_auto"]:
                 b = e["_bill"]
                 keys[dup_key(b.iban, b.reference, e["_amount"], b.message)].add(e["doc_id"])
         for key, docs in keys.items():
@@ -626,7 +719,10 @@ class Engine:
             payments = []
             for e, p in grp:
                 e2e = f"PL{e['doc_id']}" + (f"-ASN{e['asn']}" if e["asn"] else "")
-                if p:
+                if p and p.get("_bill") is not None:
+                    # eigener Einzahlungsschein: Referenz und Mitteilung unverändert übernehmen
+                    payments.append(pain001.Payment(p["_bill"], f"{e2e}-T{p['no']}", p["_amount"], p["_date"]))
+                elif p:
                     b = e["_bill"]
                     msg = f"Teilzahlung {p['no']}/{p['of']}" + (f" {b.message}" if b.message else "")
                     payments.append(pain001.Payment(replace(b, message=msg[:140]), f"{e2e}-T{p['no']}",
@@ -649,7 +745,7 @@ class Engine:
                 filename = f"pain001_{datetime.now():%Y%m%d_%H%M}_E{export_id}_{slug(acc['label'])}.xml"
                 s.db.execute("UPDATE exports SET filename=? WHERE id=?", (filename, export_id))
                 for (e, p), pay in zip(grp, payments):
-                    b = e["_bill"]
+                    b = pay.bill
                     s.db.execute("INSERT INTO export_items (export_id, doc_id, creditor, iban, reference, currency, "
                                  "amount, exec_date, part) VALUES (?,?,?,?,?,?,?,?,?)",
                                  (export_id, e["doc_id"], b.creditor.name, b.iban, b.reference, b.currency,
@@ -1091,6 +1187,7 @@ class Engine:
 BOOKING_LABEL = {"batch": "Sammelbuchung", "single": "Einzelbuchung", "bank": "Bankvorgabe"}
 MONTHS = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"]
 DAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+SCAN_VERSION = 2   # 2: alle QR-Codes eines Dokuments (Ratenscheine)
 HORIZONS = {"30d": ("day", 30), "8w": ("week", 8), "3m": ("week", 13), "6m": ("month", 6), "12m": ("month", 12)}
 
 
@@ -1180,6 +1277,48 @@ def field_value(field: dict, amount: Decimal, ccy: str):
     return str(v)
 
 
+def add_months(d: date, n: int) -> date:
+    m = d.month - 1 + n
+    y, m = d.year + m // 12, m % 12 + 1
+    last = (date(y + (m == 12), m % 12 + 1, 1) - timedelta(days=1)).day
+    return date(y, m, min(d.day, last))
+
+
+_DATE_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4}|\d{2})\b")
+_DUE_WORDS = re.compile(r"(fällig|zahlbar|bis|per|spätestens|termin|échéance|payable|due)\W*(am|le|on)?\W*$", re.I)
+
+
+def due_from_bill(b: QRBill) -> date | None:
+    """Fälligkeit eines Einzahlungsscheins: Swico-Rechnungsinformationen (//S1/ Datum + Zahlungsfrist)
+    oder ein Datum in der Mitteilung («fällig am 31.10.2026», «zahlbar bis …»)."""
+    info = b.bill_info or ""
+    if info.startswith("//S1/"):
+        tags, parts = {}, info[5:].split("/")
+        for i in range(0, len(parts) - 1, 2):
+            tags[parts[i]] = parts[i + 1]
+        try:
+            inv = datetime.strptime(tags["11"][:6], "%y%m%d").date() if tags.get("11") else None
+        except ValueError:
+            inv = None
+        terms = [c.split(":") for c in tags.get("40", "").split(";") if ":" in c]
+        days = [int(t[1]) for t in terms if t[1].isdigit() and t[0] in ("0", "0.0", "0.00")]
+        if inv and days:
+            return inv + timedelta(days=max(days))
+    text = " ".join(x for x in (b.message, info) if x)
+    hits = []
+    for m in _DATE_RE.finditer(text):
+        d_, mo, y = (int(g) for g in m.groups())
+        y += 2000 if y < 100 else 0
+        try:
+            hits.append((date(y, mo, d_), bool(_DUE_WORDS.search(text[:m.start()]))))
+        except ValueError:
+            continue
+    keyed = [d for d, k in hits if k]
+    if keyed:
+        return keyed[-1]
+    return hits[0][0] if len(hits) == 1 else None
+
+
 def account_debtor(a: dict) -> pain001.Debtor:
     return pain001.Debtor(name=a["name"], iban=a["iban"], bic=a["bic"], street=a["street"], building=a["building"],
                           postal_code=a["postal_code"], town=a["town"], country=a["country"] or "CH")
@@ -1190,29 +1329,55 @@ def slug(text: str) -> str:
     return t[:30] or "Konto"
 
 
-def apply_duplicates(e: dict, idx: dict) -> None:
-    """Duplikatprüfung auf ein fertig berechnetes Ergebnis anwenden (Raten derselben Rechnung zählen nicht)."""
-    if not e["_dupkey"] or e["status"] != "open":
-        return
-    iban, ref, amount, _ = e["_dupkey"]
-    cands = idx.get(e["_dupkey"], [])
+def _dup_candidates(key: tuple, idx: dict, doc_id: int) -> list[dict]:
+    iban, ref, amount, _ = key
+    cands = idx.get(key, [])
     if not ref:  # ohne Referenz: Historie kennt die Mitteilung nicht -> IBAN + Betrag vergleichen
         cands = cands + idx.get((iban, "", amount, "*"), [])
-    dups = [o for o in cands if o.get("doc_id") != e["doc_id"]]
-    if not dups:
+    return [o for o in cands if o.get("doc_id") != doc_id]
+
+
+def _dup_text(dups: list[dict]) -> str:
+    return "; ".join(f"bereits bezahlt mit Export #{d['export_id']} ({d['exec_date']})" if d["kind"] == "paid"
+                     else f"gleich wie Dokument #{d['doc_id']}" for d in dups)
+
+
+def apply_duplicates(e: dict, idx: dict) -> None:
+    """Duplikatprüfung auf ein fertig berechnetes Ergebnis anwenden (Raten derselben Rechnung zählen nicht).
+
+    Bei mehreren Einzahlungsscheinen wird jeder Schein einzeln geprüft."""
+    if e["status"] != "open":
         return
-    txt = "; ".join(f"bereits bezahlt mit Export #{d['export_id']} ({d['exec_date']})" if d["kind"] == "paid"
-                    else f"gleich wie Dokument #{d['doc_id']}" for d in dups)
-    e["duplicate"] = True
-    if e["overrides"].get("dup_ok"):
-        e["warnings"].append(f"Mögliches Duplikat bestätigt: {txt}")
-        return
-    e["errors"].append(f"Mögliches Duplikat: {txt}")
-    e["exportable"] = False
-    for p in e["_parts"]:
+    ok = e["overrides"].get("dup_ok")
+    if e["_dupkey"] and not e["plan_auto"]:
+        dups = _dup_candidates(e["_dupkey"], idx, e["doc_id"])
+        if dups:
+            e["duplicate"] = True
+            if ok:
+                e["warnings"].append(f"Mögliches Duplikat bestätigt: {_dup_text(dups)}")
+            else:
+                e["errors"].append(f"Mögliches Duplikat: {_dup_text(dups)}")
+                e["exportable"] = False
+                for p in e["_parts"]:
+                    p["exportable"] = False
+                for p in e["parts"]:
+                    p["exportable"] = False
+    for p, key in e.get("_partkeys", []):
+        dups = _dup_candidates(key, idx, e["doc_id"])
+        if not dups:
+            continue
+        e["duplicate"] = True
+        if ok:
+            e["warnings"].append(f"Rate {p['no']}: mögliches Duplikat bestätigt: {_dup_text(dups)}")
+            continue
+        p["errors"].append(f"Mögliches Duplikat: {_dup_text(dups)}")
         p["exportable"] = False
-    for p in e["parts"]:
-        p["exportable"] = False
+        for q in e["parts"]:
+            if q["no"] == p["no"]:
+                q["exportable"] = False
+        e["warnings"].append(f"Rate {p['no']}: mögliches Duplikat ({_dup_text(dups)})")
+    if e["_parts"]:
+        e["exportable"] = any(p["exportable"] for p in e["_parts"])
 
 
 def paid_key(iban: str, reference: str, amount: Decimal | None) -> tuple:

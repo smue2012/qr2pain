@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0 – 2026-10-01
+
+**Mehrere Einzahlungsscheine pro Dokument**
+- alle Swiss QR Codes eines Dokuments werden gelesen (von hinten, bis eine Seite ohne QR-Code kommt)
+- mehrere Scheine werden automatisch zu Raten, jede mit eigener Referenz, eigenem Betrag und eigener Mitteilung
+- Datum pro Rate aus dem Schein (Swico //S1/ Rechnungsdatum + Zahlungsfrist oder «zahlbar bis …»), sonst geschätzt
+- Raten lassen sich anpassen oder einzelne Scheine entfernen (bereits bezahlt); Rücksetzen auf die automatische Aufteilung
+- Duplikatprüfung pro Einzahlungsschein, Tag «Ratenzahlung» wird beim Einlesen gesetzt
+- bestehende offene Rechnungen werden beim ersten Sync nach dem Update einmal neu eingelesen
+
 ## 1.3.3 – 2026-09-29
 
 - Zeitpunkte (letzter Sync, Exporte, Protokoll, Kontostand) werden in der Zeitzone des Browsers angezeigt

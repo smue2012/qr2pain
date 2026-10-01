@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     pl_amount     TEXT,            -- Betrag aus paperless-Monetary-Feld
     qr_raw        TEXT,            -- Original-Payload des Swiss QR Codes
     scan_error    TEXT,            -- QR-Code nicht lesbar
+    qr_extra      TEXT NOT NULL DEFAULT '[]',  -- weitere Swiss QR Codes im selben Dokument (z. B. Ratenscheine)
+    scan_v        INTEGER NOT NULL DEFAULT 1,  -- Version der QR-Erkennung (ältere werden einmal neu gelesen)
     overrides     TEXT NOT NULL DEFAULT '{}',
     held          INTEGER NOT NULL DEFAULT 0,
     status        TEXT NOT NULL DEFAULT 'open',   -- open | exported
@@ -115,6 +117,10 @@ class Store:
         if "tags" not in cols:
             self.db.execute("ALTER TABLE invoices ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'")
             self.db.execute("ALTER TABLE invoices ADD COLUMN storage_path TEXT")
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(invoices)").fetchall()}
+        if "qr_extra" not in cols:  # 1.4: mehrere QR-Codes pro Dokument
+            self.db.execute("ALTER TABLE invoices ADD COLUMN qr_extra TEXT NOT NULL DEFAULT '[]'")
+            self.db.execute("ALTER TABLE invoices ADD COLUMN scan_v INTEGER NOT NULL DEFAULT 1")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(accounts)").fetchall()}
         if "booking" not in cols:  # 1.2: Verbuchungsart
             self.db.execute("ALTER TABLE accounts ADD COLUMN booking TEXT NOT NULL DEFAULT 'batch'")
@@ -163,6 +169,7 @@ class Store:
         if r:
             r["overrides"] = json.loads(r["overrides"] or "{}")
             r["tags"] = json.loads(r.get("tags") or "[]")
+            r["qr_extra"] = json.loads(r.get("qr_extra") or "[]")
         return r
 
     def invoices(self, where: str = "1=1", *args) -> list[dict]:
@@ -170,6 +177,7 @@ class Store:
         for r in rows:
             r["overrides"] = json.loads(r["overrides"] or "{}")
             r["tags"] = json.loads(r.get("tags") or "[]")
+            r["qr_extra"] = json.loads(r.get("qr_extra") or "[]")
         return rows
 
     def upsert_invoice(self, doc_id: int, **fields) -> None:

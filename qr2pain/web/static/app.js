@@ -225,6 +225,7 @@ function badges(x) {
 function partBadge(x, p) {
   if (p.exported) return `<span class="badge">Exportiert #${p.export_id}</span>`;
   if (p.errors.length) return `<span class="badge err" title="${esc(p.errors.join("\n"))}">${esc(p.errors[0])}</span>`;
+  if (p.exportable && p.estimated) return `<span class="badge warn" title="Kein Datum auf dem Einzahlungsschein gefunden – in der Aufteilung prüfen">Datum geschätzt</span>`;
   if (p.exportable) return `<span class="badge ok">Bereit</span>`;
   return x.held ? `<span class="badge held">Zurückgestellt</span>` : `<span class="badge err">Rechnung prüfen</span>`;
 }
@@ -269,7 +270,7 @@ function renderList() {
       const key = `${x.doc_id}:${p.no}`;
       return `<tr class="part ${p.exported ? "done" : ""}" data-id="${x.doc_id}">
         <td class="chk">${p.exported ? "" : `<input type="checkbox" data-key="${key}" ${S.sel.has(key) ? "checked" : ""} aria-label="Rate ${p.no} auswählen">`}</td>
-        <td colspan="2" class="part-label">Rate ${p.no} von ${p.of}</td>
+        <td colspan="2" class="part-label">Rate ${p.no} von ${p.of}${p.reference ? ` <span class="mono muted small" title="Referenz des Einzahlungsscheins">· ${esc(fmtRef(p.reference, /^\d{27}$/.test(p.reference) ? "QRR" : ""))}</span>` : ""}</td>
         <td></td>
         <td>${dt(p.date)}</td>
         <td class="num"><span class="ccy">${esc(e.currency)}</span>${money(p.amount)}</td>
@@ -556,6 +557,7 @@ async function openDrawer(id, keepTab = false) {
   const F = fields(x);
   const ro = x.status !== "open";
   const lock = ro || x.parts_done > 0;   // nach der ersten exportierten Rate nur noch Raten änderbar
+  const multi = x.qr_count > 1;          // mehrere Einzahlungsscheine: Betrag und Referenz gelten pro Rate
   const dupErr = x.errors.some((m) => m.startsWith("Mögliches Duplikat")) || x.overrides.dup_ok;
   $("#d-pay").innerHTML = `
     <div class="msgs">
@@ -564,11 +566,12 @@ async function openDrawer(id, keepTab = false) {
     </div>
     <form id="d-form" autocomplete="off">
       ${x.parts_done > 0 && !ro ? `<p class="msg info"><b>i</b><span>${x.parts_done} Rate(n) bereits exportiert – Betrag und Empfängerdaten sind gesperrt, offene Raten bleiben änderbar.</span></p>` : ""}
-      <fieldset ${lock ? "disabled" : ""}><legend>Zahlung</legend><div class="fgrid">${F.pay.map((f) => fieldHtml(x, f)).join("")}
+      ${multi && !ro ? `<p class="msg info"><b>i</b><span>${x.qr_count} Einzahlungsscheine im Dokument. Jede Rate wird mit ihrem eigenen Schein bezahlt – Betrag und Referenz stehen in der Aufteilung.</span></p>` : ""}
+      <fieldset ${lock || multi ? "disabled" : ""}><legend>Zahlung</legend><div class="fgrid">${F.pay.map((f) => fieldHtml(x, f)).join("")}
         ${x.split ? `<p class="f s3 muted small split-hint">Ausführungsdatum pro Rate, siehe unten</p>` : ""}</div></fieldset>
       <fieldset ${ro ? "disabled" : ""} class="split-fs"><legend>Aufteilung in Raten</legend><div id="d-split"></div></fieldset>
       <fieldset ${lock ? "disabled" : ""}><legend>Empfänger</legend><div class="fgrid">${F.cred.map((f) => fieldHtml(x, f)).join("")}</div></fieldset>
-      <fieldset ${lock ? "disabled" : ""}><legend>Referenz</legend><div class="fgrid">${F.ref.map((f) => fieldHtml(x, f)).join("")}
+      <fieldset ${lock || multi ? "disabled" : ""}><legend>Referenz${multi ? " (1. Einzahlungsschein)" : ""}</legend><div class="fgrid">${F.ref.map((f) => fieldHtml(x, f)).join("")}
         ${e.bill_info ? `<label class="f">Rechnungsinformationen<input value="${esc(e.bill_info)}" class="mono" readonly></label>` : ""}</div></fieldset>
       <fieldset ${ro ? "disabled" : ""}><legend>Intern</legend><div class="fgrid">
         <label class="f">Kommentar <textarea name="comment" rows="2" placeholder="z. B. Skonto 2 % abgezogen">${esc(x.overrides.comment || "")}</textarea></label>
@@ -668,48 +671,57 @@ function renderPlan(x) {
     return;
   }
   const rows = S.plan.rows;
-  const sum = rows.reduce((s, r) => s + cents(r.amount), 0), diff = cents(e.amount) - sum;
+  const qrPlan = rows.some((r) => r.qr != null);   // Raten aus den Einzahlungsscheinen des Dokuments
+  const sum = rows.reduce((s, r) => s + cents(r.amount), 0), diff = qrPlan ? 0 : cents(e.amount) - sum;
+  const ref = (r) => (r.reference ? `<div class="mono muted small" title="Referenz des Einzahlungsscheins">${esc(fmtRef(r.reference, /^\d{27}$/.test(r.reference) ? "QRR" : ""))}</div>` : "");
   el.innerHTML = `
+    ${qrPlan && x.plan_auto && !ro ? `<p class="muted small">Automatisch aus den Einzahlungsscheinen gebildet. Datum aus dem Schein,
+      sonst geschätzt (monatlich). Bereits bezahlte Scheine hier entfernen.</p>` : ""}
     <table class="grid plan"><thead><tr><th>Rate</th><th>Ausführung</th><th class="num">Betrag ${esc(e.currency)}</th><th></th></tr></thead><tbody>
     ${rows.map((r, i) => r.exported
-      ? `<tr class="done"><td>${i + 1}</td><td>${dt(r.date)}</td><td class="num">${money(r.amount)}</td>
+      ? `<tr class="done"><td>${i + 1}${ref(r)}</td><td>${dt(r.date)}</td><td class="num">${money(r.amount)}</td>
            <td><span class="badge">Export #${r.export_id}</span></td></tr>`
-      : `<tr><td>${i + 1}</td>
-           <td><input type="date" data-i="${i}" data-f="date" value="${esc(r.date || "")}" min="${today()}" ${ro ? "disabled" : ""}></td>
+      : `<tr><td>${i + 1}${ref(r)}</td>
+           <td><input type="date" data-i="${i}" data-f="date" value="${esc(r.date || "")}" min="${today()}" ${ro ? "disabled" : ""}>
+             ${r.estimated ? `<div class="small warn-ink">geschätzt</div>` : ""}</td>
            <td class="num"><input data-i="${i}" data-f="amount" value="${esc(r.amount)}" inputmode="decimal" class="num-in" ${ro ? "disabled" : ""}></td>
            <td>${ro || rows.filter((y) => !y.exported).length <= 1 ? "" : `<button type="button" class="btn link" data-del="${i}" aria-label="Rate ${i + 1} entfernen">Entfernen</button>`}</td></tr>`).join("")}
     </tbody><tfoot><tr><td colspan="2">Summe</td><td class="num"><b>${money(fromCents(sum))}</b></td>
       <td class="${diff ? "diff-bad" : "diff-ok"}">${diff ? `Differenz ${money(fromCents(diff))}` : "✓ stimmt"}</td></tr></tfoot></table>
     ${ro ? "" : `<div class="plan-actions">
-      <button type="button" class="btn" id="p-add">+ Rate</button>
-      <button type="button" class="btn" id="p-dist">Offenen Betrag gleichmässig verteilen</button>
+      ${qrPlan ? "" : `<button type="button" class="btn" id="p-add">+ Rate</button>
+      <button type="button" class="btn" id="p-dist">Offenen Betrag gleichmässig verteilen</button>`}
       <span class="spacer"></span>
       ${S.plan.dirty ? `<button type="button" class="btn" id="p-cancel">Verwerfen</button>` : ""}
-      ${!S.plan.dirty && x.split && !x.parts_done ? `<button type="button" class="btn danger" id="p-remove">Aufteilung entfernen</button>` : ""}
+      ${!S.plan.dirty && x.split && !x.parts_done && !x.plan_auto
+        ? `<button type="button" class="btn danger" id="p-remove">${qrPlan ? "Zurück zu den Einzahlungsscheinen" : "Aufteilung entfernen"}</button>` : ""}
       <button type="button" class="btn primary" id="p-save" ${S.plan.dirty ? "" : "disabled"}>Aufteilung speichern</button></div>`}`;
   if (ro) return;
   $$("#d-split input[data-i]").forEach((inp) => inp.addEventListener("change", () => {
     rows[Number(inp.dataset.i)][inp.dataset.f] = inp.value.trim();
+    if (inp.dataset.f === "date") rows[Number(inp.dataset.i)].estimated = false;
     S.plan.dirty = true;
     renderPlan(x);
   }));
   $$("#d-split [data-del]").forEach((b) => b.addEventListener("click", () => {
     rows.splice(Number(b.dataset.del), 1); S.plan.dirty = true; renderPlan(x);
   }));
-  $("#p-add").addEventListener("click", () => {
+  $("#p-add")?.addEventListener("click", () => {
     const last = rows[rows.length - 1];
     rows.push({ date: addInterval(last?.date || today(), 1, "m"), amount: "0", exported: false });
     distribute(rows, e.amount); S.plan.dirty = true; renderPlan(x);
   });
-  $("#p-dist").addEventListener("click", () => { distribute(rows, e.amount); S.plan.dirty = true; renderPlan(x); });
+  $("#p-dist")?.addEventListener("click", () => { distribute(rows, e.amount); S.plan.dirty = true; renderPlan(x); });
   $("#p-cancel")?.addEventListener("click", () => { S.plan = null; renderPlan(x); });
   $("#p-remove")?.addEventListener("click", async () => {
-    if (!(await confirmModal("Aufteilung entfernen?", "<p>Die Rechnung wird wieder als eine Zahlung geführt.</p>", "Entfernen", true))) return;
+    if (!(await confirmModal(qrPlan ? "Änderungen an der Aufteilung verwerfen?" : "Aufteilung entfernen?",
+      qrPlan ? "<p>Die Raten werden wieder automatisch aus allen Einzahlungsscheinen gebildet.</p>"
+        : "<p>Die Rechnung wird wieder als eine Zahlung geführt.</p>", qrPlan ? "Zurücksetzen" : "Entfernen", true))) return;
     S.plan = null; await patch(x.doc_id, { installments: null });
   });
   $("#p-save").addEventListener("click", async () => {
     if (rows.length < 2) return toast("Mindestens zwei Raten nötig", true);
-    const plan = rows.map((r) => ({ amount: fromCents(cents(r.amount)), date: r.date }));
+    const plan = rows.map((r) => ({ amount: fromCents(cents(r.amount)), date: r.date, ...(r.qr != null ? { qr: r.qr } : {}) }));
     S.plan = null;
     await patch(x.doc_id, { installments: plan });
   });

@@ -23,6 +23,21 @@ def make_pdf(**kw) -> bytes:
     return cairosvg.svg2pdf(bytestring=svg.getvalue().encode())
 
 
+def make_multi_pdf(slips: list[dict]) -> bytes:
+    """Mehrseitiges PDF: Rechnungsseite ohne QR-Code, danach je Seite ein Einzahlungsschein."""
+    import pypdfium2 as pdfium
+    out = pdfium.PdfDocument.new()
+    first = pdfium.PdfDocument(cairosvg.svg2pdf(
+        bytestring=b'<svg xmlns="http://www.w3.org/2000/svg" width="595" height="842">'
+                   b'<text x="60" y="80" font-size="20">Rechnung mit Ratenscheinen</text></svg>'))
+    out.import_pages(first)
+    for kw in slips:
+        out.import_pages(pdfium.PdfDocument(make_pdf(**kw)))
+    buf = io.BytesIO()
+    out.save(buf)
+    return buf.getvalue()
+
+
 def qrr(base: str) -> str:
     t, c = [0, 9, 4, 6, 8, 2, 7, 1, 3, 5], 0
     base = base.zfill(26)
@@ -67,6 +82,16 @@ SPEC = {
           creditor=cred("Grenke AG", "Ruessenstrasse", "6", "6340", "Baar"),
           reference_number=qrr("221")), None),
 }
+# Dokument mit drei Ratenscheinen (zwei mit Datum in der Mitteilung, einer ohne)
+_T0 = date.today()
+_d1, _d2 = _T0 + timedelta(days=20), _T0 + timedelta(days=50)
+MULTI = [dict(account="CH4431999123000889012", amount=a, reference_number=qrr(r), additional_information=m,
+              creditor=cred("Garage Muster AG", "Werkstrasse", "3", "6010", "Kriens"))
+         for a, r, m in (("400.00", "501", f"1. Rate, zahlbar bis {_d1:%d.%m.%Y}"),
+                         ("400.00", "502", f"2. Rate, zahlbar bis {_d2:%d.%m.%Y}"),
+                         ("400.50", "503", "3. Rate"))]
+SPEC[111] = ("Autoreparatur in 3 Raten", 9, 25, "multi", None)
+
 DOCS = {}
 for i, (title, c, due, kw, amt) in SPEC.items():
     DOCS[i] = {
@@ -76,7 +101,7 @@ for i, (title, c, due, kw, amt) in SPEC.items():
         "modified": f"{T.isoformat()}T08:00:00+02:00", "archive_serial_number": 2000 + i,
         "custom_fields": [{"field": 11, "value": (T + timedelta(days=due)).isoformat()}]
         + ([{"field": 12, "value": amt}] if amt else []),
-        "_pdf": make_pdf(**kw) if kw else cairosvg.svg2pdf(
+        "_pdf": make_multi_pdf(MULTI) if kw == "multi" else make_pdf(**kw) if kw else cairosvg.svg2pdf(
             bytestring=b'<svg xmlns="http://www.w3.org/2000/svg" width="595" height="842">'
                        b'<text x="60" y="80" font-size="20">Rechnung (Scan ohne QR-Code)</text></svg>'),
     }
@@ -84,7 +109,7 @@ TAGS = {1: "QR zu zahlen", 20: "Firma B"}
 TAG_OWNERS: dict = {}
 STORAGE_PATHS = {1: "Firma B/Rechnungen"}
 CORR = {1: "Robert Schneider AG", 2: "Müller & Söhne", 3: "Verein Beispiel", 4: "CKW", 5: "Hostpoint",
-        6: "Lyreco", 7: "Peoplefone", 8: "Grenke"}
+        6: "Lyreco", 7: "Peoplefone", 8: "Grenke", 9: "Garage Muster"}
 FIELDS = {11: "Fällig am", 12: "Betrag", 13: "Zahlbetrag", 14: "Zahlungsdatum"}
 FIELD_TYPES = {11: "date", 12: "monetary", 13: "monetary", 14: "date"}
 USERS = {"stephan": ("geheim", "tok-stephan"), "buchhaltung": ("geheim2", "tok-bh")}

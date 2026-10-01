@@ -86,12 +86,12 @@ def test_permissions(web):
     st = web["client"]("stephan", "geheim")
     assert sync(bh)["new"] == 5
     assert ids(bh) == [101, 102, 103, 104, 105]
-    assert sync(st)["new"] == 5
-    assert ids(st) == list(range(101, 111))
+    assert sync(st)["new"] == 6
+    assert ids(st) == list(range(101, 112))
     # erneuter Sync mit weniger Rechten entfernt nichts
     s = sync(bh)
-    assert s["removed"] == 0 and s.get("hidden") == 5
-    assert len(ids(st)) == 10
+    assert s["removed"] == 0 and s.get("hidden") == 6
+    assert len(ids(st)) == 11
     # Direktzugriffe auf fremde Dokumente
     for method, url, kw in [("get", "/api/invoices/108", {}), ("patch", "/api/invoices/108", {"json": {"comment": "x"}}),
                             ("get", "/api/invoices/108/pages", {}),
@@ -387,3 +387,90 @@ def test_shared_amount_field(web):
         st.patch("/api/invoices/103", json={"installments": None})
     finally:
         engine.cfg["web"] = old_web
+
+
+
+# ---------------------------------------------------------------- mehrere Einzahlungsscheine
+
+def test_due_from_bill():
+    from qr2pain.swissqr import Address, QRBill
+    from qr2pain.web.service import due_from_bill
+    b = QRBill("CH4431999123000889012", Address("S", "X", town="Y", country="CH"), None, "CHF", None, "NON", "")
+    assert due_from_bill(replace_(b, bill_info="//S1/10/4711/11/260915/40/0:30")) == date(2026, 10, 15)
+    assert due_from_bill(replace_(b, message="Rate 2, zahlbar bis 31.12.2026")) == date(2026, 12, 31)
+    assert due_from_bill(replace_(b, message="Rechnung vom 01.09.2026, fällig am 30.09.26")) == date(2026, 9, 30)
+    assert due_from_bill(replace_(b, message="Vertrag 01.01.2026 / 01.02.2026")) is None   # mehrdeutig
+    assert due_from_bill(replace_(b, message="3. Rate")) is None
+
+
+def replace_(b, **kw):
+    from dataclasses import replace
+    return replace(b, **kw)
+
+
+def test_multi_qr_installments(web):
+    st = web["client"]("stephan", "geheim")
+    m = web["mock"]
+    x = st.get("/api/invoices/111").json()
+    assert x["qr_count"] == 3 and x["plan_auto"] and x["split"] and not x["errors"], x["errors"]
+    assert [p["amount"] for p in x["parts"]] == ["400.00", "400.00", "400.50"]
+    assert x["effective"]["amount"] == "1200.50"
+    assert [p["reference"][-3:] for p in x["parts"]] == [m.qrr("501")[-3:], m.qrr("502")[-3:], m.qrr("503")[-3:]]
+    assert [p["estimated"] for p in x["parts"]] == [False, False, True]
+    assert x["parts"][0]["date"] <= m._d1.isoformat() and x["parts"][1]["date"] <= m._d2.isoformat()
+    assert x["parts"][2]["date"] > x["parts"][1]["date"]
+    assert any("geschätzt" in w for w in x["warnings"])
+    assert "Ratenzahlung" in tag_names(web, 111)
+
+    # erste Rate exportieren: eigene Referenz und Mitteilung, kein «Teilzahlung»-Präfix
+    ex = st.post("/api/exports", json={"items": ["111:1"]}).json()
+    xml = st.get(f"/api/exports/{ex['id']}/xml").text
+    XSD.validate(xml)
+    assert m.qrr("501") in xml and m.qrr("502") not in xml and "1. Rate, zahlbar bis" in xml
+    assert "Teilzahlung" not in xml and "<InstdAmt Ccy=\"CHF\">400.00</InstdAmt>" in xml
+    assert fields_of(web, 111)["Zahlbetrag"] == "CHF800.50"            # offener Rest
+    x = st.get("/api/invoices/111").json()
+    assert x["parts_done"] == 1 and x["status"] == "open"
+
+    # Aufteilung anpassen: dritten Schein entfernen (z. B. bereits bezahlt), exportierte Rate bleibt
+    plan = [{"amount": p["amount"], "date": p["date"], "qr": p["qr"]} for p in x["parts"][:2]]
+    r = st.patch("/api/invoices/111", json={"installments": plan})
+    assert r.status_code == 200, r.text
+    x = r.json()
+    assert not x["plan_auto"] and len(x["parts"]) == 2 and x["effective"]["amount"] == "800.00"
+    assert x["parts"][1]["reference"] == m.qrr("502")
+    # exportierte Rate darf nicht verändert werden
+    bad = [{**plan[0], "amount": "1.00"}, plan[1]]
+    assert st.patch("/api/invoices/111", json={"installments": bad}).status_code == 400
+
+    # zweite Rate exportieren -> Rechnung erledigt
+    ex2 = st.post("/api/exports", json={"items": ["111:2"]}).json()
+    assert m.qrr("502") in st.get(f"/api/exports/{ex2['id']}/xml").text
+    assert 111 not in ids(st)
+    f = fields_of(web, 111)
+    assert f["Zahlbetrag"] == "CHF800.00" and f["Zahlungsdatum"] == plan[1]["date"]
+
+    # ein anderes Dokument mit demselben Einzahlungsschein wäre ein Duplikat (Historie pro Schein)
+    from qr2pain.web.app import engine
+    idx = engine.dup_index()
+    from qr2pain.web.service import paid_key
+    from decimal import Decimal
+    assert idx[paid_key("CH4431999123000889012", m.qrr("502"), Decimal("400.00"))]
+
+    st.post(f"/api/exports/{ex2['id']}/revert")
+    st.post(f"/api/exports/{ex['id']}/revert")
+    st.patch("/api/invoices/111", json={"installments": None})
+    x = st.get("/api/invoices/111").json()
+    assert x["plan_auto"] and len(x["parts"]) == 3 and x["parts_done"] == 0
+
+
+def test_rescan_after_update(web):
+    """Einträge aus älteren Versionen (nur ein QR-Code gelesen) werden beim nächsten Sync einmal neu gelesen."""
+    from qr2pain.web.app import engine
+    st = web["client"]("stephan", "geheim")
+    engine.store.x("UPDATE invoices SET qr_extra='[]', scan_v=1 WHERE doc_id=111")
+    assert st.get("/api/invoices/111").json()["qr_count"] == 1
+    sync(st)
+    x = st.get("/api/invoices/111").json()
+    assert x["qr_count"] == 3 and x["plan_auto"]
+    assert engine.store.one("SELECT MIN(scan_v) v FROM invoices WHERE status='open'")["v"] == 2

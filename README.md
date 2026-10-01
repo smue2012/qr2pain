@@ -56,6 +56,12 @@ bleibt erhalten und wird bei Bedarf automatisch migriert.
   - In der Zahlung steht «Teilzahlung n/N», die EndToEndId endet auf `-T<n>`.
   - In paperless erhält die Rechnung das Tag «Ratenzahlung» (`[tags] installments`). Als exportiert gilt sie erst nach der letzten Rate.
   - Nach der ersten exportierten Rate sind Betrag und Empfängerdaten gesperrt. Offene Raten bleiben änderbar.
+- **Mehrere Einzahlungsscheine** in einem Dokument (z. B. Ratenscheine) werden automatisch zu Raten:
+  - jede Rate wird mit ihrem eigenen Schein bezahlt (Referenz, Betrag und Mitteilung aus dem QR-Code)
+  - Datum aus dem Schein (Swico-Zahlungsbedingungen oder «zahlbar bis …» in der Mitteilung), sonst ab der Fälligkeit monatlich geschätzt und als «Datum geschätzt» markiert
+  - bereits bezahlte Scheine in der Aufteilung entfernen; «Zurück zu den Einzahlungsscheinen» stellt die automatische Aufteilung wieder her
+  - die Duplikatprüfung gilt pro Schein
+  - Gesucht wird von der letzten Seite rückwärts, bis eine Seite ohne QR-Code kommt.
 - **Duplikatprüfung** gleicht mit anderen offenen Rechnungen und mit allen bisherigen Exporten ab (IBAN + Referenz + Betrag). Mögliche Duplikate werden blockiert, bis sie bestätigt sind.
 - **pain.001 erstellen** aus der Auswahl: Vorher erscheint eine Zusammenfassung pro Ausführungsdatum und Währung. Danach markiert das Tool die Dokumente in paperless als exportiert und hängt eine Notiz an.
 

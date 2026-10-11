@@ -158,9 +158,12 @@ Dokumentdatum + `default_terms_days`; das Frontend kennzeichnet sie dann als «g
   (`access_cache_seconds`, Standard 60 s). Geänderte Rechte in paperless greifen spätestens danach.
 - Enthält ein Export auch Rechnungen, die du nicht sehen darfst, siehst du nur deine Positionen und einen Hinweis.
   Download und Rückgängig sind dann nur für Benutzer möglich, die alle Positionen sehen.
-- Beim Laden aus paperless wird eine Rechnung nur entfernt, wenn das Tag «QR zu zahlen» tatsächlich fehlt.
-  Als gelöscht gilt ein Dokument nur, wenn ein paperless-Superuser es nicht mehr findet. Fehlende Rechte des ladenden
-  Benutzers entfernen nichts.
+- Beim Laden aus paperless wird eine Rechnung entfernt, wenn das Tag «QR zu zahlen» fehlt oder das Dokument gelöscht
+  wurde. paperless meldet gelöschte Dokumente und fehlende Rechte gleich («nicht gefunden»). Als gelöscht gilt ein
+  Dokument deshalb nur, wenn der ladende Benutzer Superuser ist, es in seinem Papierkorb liegt oder er es früher schon
+  gesehen hat. Fremde Dokumente ohne Zugriff bleiben stehen.
+- Entfernte Rechnungen werden nur ausgeblendet: Taucht das Dokument wieder auf (Papierkorb wiederhergestellt, Tag
+  wieder gesetzt), ist es samt Korrekturen zurück.
 - Tagging und Notizen laufen mit den Rechten des angemeldeten Benutzers. `allowed_users` schränkt den Zugang zusätzlich ein.
 - Sessions liegen im Arbeitsspeicher. Nach einem Neustart muss man sich neu anmelden.
 

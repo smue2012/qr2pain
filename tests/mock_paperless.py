@@ -121,6 +121,21 @@ VISIBLE = {"tok-bh": {101, 102, 103, 104, 105}}
 def can_see(tok, doc_id):
     return tok not in VISIBLE or doc_id in VISIBLE[tok]
 LOG = {"patch": [], "notes": []}
+TRASH: dict = {}   # gelöschte Dokumente: id -> (Dokument, Eigentümer-Token)
+
+
+def delete_doc(doc_id: int, owner: str | None = None) -> None:
+    """Wie paperless: Dokument in den Papierkorb; Papierkorb zeigt es nur dem Eigentümer und Superusern."""
+    TRASH[doc_id] = (DOCS.pop(doc_id), owner)
+
+
+def purge_doc(doc_id: int) -> None:
+    """Papierkorb geleert: Dokument ist ganz weg."""
+    TRASH.pop(doc_id, None)
+
+
+def restore_doc(doc_id: int) -> None:
+    DOCS[doc_id] = TRASH.pop(doc_id)[0]
 
 
 def pub(d):
@@ -180,6 +195,9 @@ class H(BaseHTTPRequestHandler):
             return self._send(200, {"username": "stephan"})
         if p == "/api/ui_settings/":
             return self._send(200, {"user": {"is_superuser": self.tok in SUPERUSERS}})
+        if p == "/api/trash/":
+            return self._list([{"id": k} for k, (_d, owner) in TRASH.items()
+                               if self.tok in SUPERUSERS or owner in (None, self.tok)])
         if p == "/api/documents/":
             LOG.setdefault("doclist", 0)
             LOG["doclist"] += 1

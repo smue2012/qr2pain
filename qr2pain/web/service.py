@@ -540,6 +540,13 @@ class Engine:
                 if doc["id"] in frozen:
                     meta.pop("pl_amount")
                 row = self.store.invoice(doc["id"])
+                seen_by = set(json.loads(row["seen_by"] or "[]")) if row else set()
+                if user not in seen_by:
+                    meta["seen_by"] = json.dumps(sorted(seen_by | {user}))
+                if row and row["status"] == "removed":   # wieder in paperless vorhanden
+                    self.store.x("UPDATE invoices SET status='open' WHERE doc_id=?", doc["id"])
+                    self.store.audit(user, doc["id"], "Wieder aufgenommen", "Dokument in paperless wieder vorhanden")
+                    row = self.store.invoice(doc["id"])
                 if row and row["status"] == "exported":
                     st["done"] += 1
                 elif row and row["modified"] == doc.get("modified") and (row["qr_raw"] or row["scan_error"]) \
@@ -588,9 +595,12 @@ class Engine:
                                          err or (f"{len(extra) + 1} QR-Codes gelesen" if extra else "QR-Code gelesen"))
                     st["done"] += 1
 
-            # Offene Rechnungen, die dieser Benutzer nicht mehr in der Liste sieht:
-            # nur entfernen, wenn das Tag wirklich weg ist – fehlende Rechte sind kein Grund.
+            # Offene Rechnungen, die dieser Benutzer nicht mehr in der Liste sieht. paperless meldet für gelöschte
+            # Dokumente und für fehlende Rechte gleichermassen «nicht gefunden». Als gelöscht gilt ein Dokument, wenn
+            # der Benutzer Superuser ist, es in seinem Papierkorb liegt oder er es früher schon gesehen hat.
+            # Ausgeblendet statt gelöscht: taucht das Dokument wieder auf, sind die Korrekturen noch da.
             superuser = pl.is_superuser()
+            trash = None
             for r in self.store.invoices("status='open'"):
                 if r["doc_id"] in seen:
                     continue
@@ -602,15 +612,20 @@ class Engine:
                     elif pending not in d["tags"]:
                         reason = "Tag «zu zahlen» in paperless entfernt"
                 except requests.HTTPError as e:
-                    if e.response is not None and e.response.status_code == 404:
-                        if superuser:
-                            reason = "Dokument in paperless gelöscht"
-                        else:
-                            st["hidden"] = st.get("hidden", 0) + 1   # kein Zugriff: stehen lassen
-                    else:
+                    if e.response is None or e.response.status_code != 404:
                         raise
-                if reason and not self.paid_parts(r["doc_id"]).get(r["doc_id"]):
-                    self.store.x("DELETE FROM invoices WHERE doc_id=?", r["doc_id"])
+                    if trash is None:
+                        trash = pl.trash_ids()
+                    if r["doc_id"] in trash:
+                        reason = "Dokument in paperless gelöscht (Papierkorb)"
+                    elif superuser:
+                        reason = "Dokument in paperless gelöscht"
+                    elif self._has_seen(user, r):
+                        reason = "Dokument in paperless gelöscht oder Berechtigung entzogen"
+                    else:
+                        st["hidden"] = st.get("hidden", 0) + 1   # nie gesehen: fremdes Dokument, stehen lassen
+                if reason:
+                    self.store.x("UPDATE invoices SET status='removed' WHERE doc_id=?", r["doc_id"])
                     self.store.audit(user, r["doc_id"], "Entfernt", reason)
                     st["removed"] += 1
             st["message"] = (f"{st['total']} Dokumente geprüft, {st['new']} neu, {st['removed']} entfernt"
@@ -952,6 +967,12 @@ class Engine:
         src = (self.cfg.get("amount_field") or "").strip().lower()
         dst = (self.cfg.get("web", {}).get("paid_amount_field", "zahlbetrag") or "").strip().lower()
         return bool(src) and src == dst
+
+    def _has_seen(self, user: str, row: dict) -> bool:
+        """Hat dieser Benutzer das Dokument früher gesehen? (Sync-Liste oder eigene Einträge im Protokoll)"""
+        if user in json.loads(row.get("seen_by") or "[]"):
+            return True
+        return bool(self.store.one("SELECT 1 FROM audit WHERE user=? AND doc_id=? LIMIT 1", user, row["doc_id"]))
 
     def payment_values(self, doc_id: int) -> tuple[Decimal | None, str | None, str]:
         """(Betrag, Datum, Währung) für die paperless-Felder.

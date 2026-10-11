@@ -474,3 +474,40 @@ def test_rescan_after_update(web):
     x = st.get("/api/invoices/111").json()
     assert x["qr_count"] == 3 and x["plan_auto"]
     assert engine.store.one("SELECT MIN(scan_v) v FROM invoices WHERE status='open'")["v"] == 2
+
+
+
+# ---------------------------------------------------------------- gelöschte Dokumente
+
+def test_deleted_documents_disappear(web):
+    m = web["mock"]
+    st = web["client"]("stephan", "geheim")
+    bh = web["client"]("buchhaltung", "geheim2")
+    sync(bh)
+    sync(st)
+    assert 105 in ids(bh) and 106 in ids(st)
+    st.patch("/api/invoices/105", json={"comment": "Kopie von 106?"})
+
+    # Benutzer ohne Superuser-Rechte, Dokument liegt in seinem Papierkorb -> entfernt
+    m.delete_doc(105, owner="tok-bh")
+    s = sync(bh)
+    assert s["removed"] == 1 and 105 not in ids(bh) and 105 not in ids(st)
+    assert not any("#105" in e for e in st.get("/api/invoices/106").json()["errors"])   # Duplikat erledigt
+    # wiederhergestellt -> wieder da, mit Korrekturen
+    m.restore_doc(105)
+    sync(bh)
+    assert 105 in ids(bh) and st.get("/api/invoices/105").json()["overrides"]["comment"] == "Kopie von 106?"
+
+    # Papierkorb geleert, Benutzer hat das Dokument früher gesehen -> entfernt
+    m.delete_doc(104, owner="tok-stephan")
+    m.purge_doc(104)
+    s = sync(bh)
+    assert s["removed"] == 1 and 104 not in ids(bh)
+
+    # fremdes Dokument, das buchhaltung nie gesehen hat -> bleibt, bis jemand mit Zugriff synchronisiert
+    m.delete_doc(110, owner="tok-stephan")
+    m.purge_doc(110)
+    sync(bh)
+    assert 110 in ids(st)
+    s = sync(st)                                    # Superuser
+    assert s["removed"] == 1 and 110 not in ids(st)

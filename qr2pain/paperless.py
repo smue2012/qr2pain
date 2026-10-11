@@ -133,6 +133,13 @@ class Paperless:
         except requests.RequestException:
             return False
 
+    def trash_ids(self) -> set[int]:
+        """IDs der Dokumente im paperless-Papierkorb, die der Benutzer sehen darf (eigene bzw. als Superuser alle)."""
+        try:
+            return {d["id"] for d in self._paged("/api/trash/", page_size=100)}
+        except requests.RequestException:
+            return set()
+
     def visible_ids(self, ids: list[int], chunk: int = 200) -> set[int]:
         """Welche dieser Dokument-IDs darf der Benutzer in paperless sehen?
 

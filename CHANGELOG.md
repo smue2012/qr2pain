@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.1 – 2026-10-11
+
+- in paperless gelöschte Dokumente verschwinden auch dann aus qr2pain, wenn der ladende Benutzer kein Superuser ist
+  (Dokument im eigenen Papierkorb oder früher schon gesehen); damit erledigen sich auch die Duplikat-Meldungen
+- entfernte Rechnungen werden ausgeblendet statt gelöscht und kommen samt Korrekturen zurück, wenn das Dokument
+  wieder auftaucht
+
 ## 1.4.0 – 2026-10-01
 
 **Mehrere Einzahlungsscheine pro Dokument**

@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS invoices (
     scan_v        INTEGER NOT NULL DEFAULT 1,  -- Version der QR-Erkennung (ältere werden einmal neu gelesen)
     overrides     TEXT NOT NULL DEFAULT '{}',
     held          INTEGER NOT NULL DEFAULT 0,
-    status        TEXT NOT NULL DEFAULT 'open',   -- open | exported
+    status        TEXT NOT NULL DEFAULT 'open',   -- open | exported | removed (in paperless nicht mehr vorhanden)
+    seen_by       TEXT NOT NULL DEFAULT '[]',     -- paperless-Benutzer, die das Dokument beim Sync gesehen haben
     export_id     INTEGER,
     synced_at     TEXT
 );
@@ -121,6 +122,9 @@ class Store:
         if "qr_extra" not in cols:  # 1.4: mehrere QR-Codes pro Dokument
             self.db.execute("ALTER TABLE invoices ADD COLUMN qr_extra TEXT NOT NULL DEFAULT '[]'")
             self.db.execute("ALTER TABLE invoices ADD COLUMN scan_v INTEGER NOT NULL DEFAULT 1")
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(invoices)").fetchall()}
+        if "seen_by" not in cols:  # 1.4.1: gelöschte Dokumente auch ohne Superuser erkennen
+            self.db.execute("ALTER TABLE invoices ADD COLUMN seen_by TEXT NOT NULL DEFAULT '[]'")
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(accounts)").fetchall()}
         if "booking" not in cols:  # 1.2: Verbuchungsart
             self.db.execute("ALTER TABLE accounts ADD COLUMN booking TEXT NOT NULL DEFAULT 'batch'")
